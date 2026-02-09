@@ -13,6 +13,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
+const { loadScopeFile, targetInScope } = require('../lib/scope');
 
 loadEnv();
 
@@ -53,6 +54,11 @@ function parseArgs(argv) {
     }
     if (key === '--allow-exploit') {
       args.allowExploit = true;
+      continue;
+    }
+    if (key === '--confirm' && val) {
+      args.confirm = val;
+      i += 1;
       continue;
     }
     if (key === '--stage' && val) {
@@ -195,7 +201,8 @@ async function runSkillOnce(skillPath, target, opts) {
       ...process.env,
       RUN_TS: opts.runTs || process.env.RUN_TS || '',
       OUT_DIR: opts.outDir || process.env.OUT_DIR || '',
-      SCOPE_FILE: opts.scopeFile || process.env.SCOPE_FILE || ''
+      SCOPE_FILE: opts.scopeFile || process.env.SCOPE_FILE || '',
+      CONFIRM: opts.confirm || process.env.CONFIRM || ''
     }
   });
 
@@ -276,7 +283,7 @@ async function main() {
   const pipelinePath = args.pipeline || 'pipeline.json';
 
   if (args.targets.length === 0) {
-    process.stderr.write('Usage: run-pipeline --target <t> [--target <t2>] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec] [--allow-exploit] [--dry-run] [--strict]\n');
+    process.stderr.write('Usage: run-pipeline --target <t> [--target <t2>] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec] [--allow-exploit] [--confirm str] [--dry-run] [--strict]\n');
     process.exit(1);
   }
 
@@ -311,7 +318,17 @@ async function main() {
   }
 
   const propagateAssets = Boolean(pipeline.options && pipeline.options.propagate_assets);
-  let stageTargets = [...args.targets];
+  const scope = loadScopeFile(args.scopeFile).entries;
+  function inScopeOrAllowAll(t) {
+    if (!args.scopeFile) return true;
+    return targetInScope(t, scope);
+  }
+
+  let stageTargets = [...args.targets].filter((t) => inScopeOrAllowAll(t));
+  const initialFiltered = args.targets.filter((t) => !inScopeOrAllowAll(t));
+  if (initialFiltered.length > 0) {
+    process.stderr.write(`[runner] scope blocked ${initialFiltered.length} initial target(s)\n`);
+  }
 
   for (const stage of selectedStages) {
     const skills = Array.isArray(stage.skills) ? stage.skills : [];
@@ -336,6 +353,7 @@ async function main() {
           rate: args.rate,
           timeout: args.timeout,
           allowExploit: args.allowExploit,
+          confirm: args.confirm,
           runTs,
           recordsStream
         });
@@ -348,7 +366,9 @@ async function main() {
 
     if (propagateAssets && discovered.size > 0) {
       const next = new Set(stageTargets);
-      discovered.forEach((t) => next.add(t));
+      discovered.forEach((t) => {
+        if (inScopeOrAllowAll(t)) next.add(t);
+      });
       stageTargets = Array.from(next);
     }
   }
