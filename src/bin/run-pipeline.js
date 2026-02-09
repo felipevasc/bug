@@ -346,13 +346,13 @@ async function main() {
   }
 
   for (const stage of selectedStages) {
-    if (stage && stage.name === 'exploit') {
+    if (stage && (stage.name === 'exploit' || stage.name === 'vuln')) {
       const okGate = Boolean(args.allowExploit) && String(args.confirm || '') === 'arrocha!';
       if (!okGate) {
         const record = buildPayload({
           type: 'note',
-          tool: 'exploit-gate',
-          stage: 'exploit',
+          tool: 'intrusive-gate',
+          stage: stage.name,
           target: stageTargets[0] || args.targets[0] || '',
           severity: 'info',
           evidence: [],
@@ -363,7 +363,7 @@ async function main() {
         process.stdout.write(`${JSON.stringify(record)}\n`);
         recordsStream.write(`${JSON.stringify(record)}\n`);
         if (!args.dryRun) void ingestRecord(record);
-        process.stderr.write('[runner] exploit stage blocked (missing --allow-exploit and/or --confirm)\n');
+        process.stderr.write(`[runner] ${stage.name} stage blocked (missing --allow-exploit and/or --confirm)\n`);
         continue;
       }
     }
