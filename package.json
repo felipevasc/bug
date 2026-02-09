@@ -10,6 +10,6 @@
     "ingest": "node src/bin/faraday-ingest.js",
     "query": "node src/bin/faraday-query.js",
     "lint": "echo 'no lint yet'",
-    "test": "echo 'no tests yet'"
+    "test": "bash scripts/smoke-test.sh"
   }
 }

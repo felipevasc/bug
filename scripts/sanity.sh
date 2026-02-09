@@ -67,6 +67,8 @@ command -v bash >/dev/null 2>&1 || fail "bash not found"
 echo "[sanity] node: $(node -v)"
 echo "[sanity] python: $(python3 --version)"
 
+export PYTHONDONTWRITEBYTECODE=1
+
 echo "[sanity] node syntax checks"
 node --check scripts/new-skill.js
 node --check src/lib/faraday.js
@@ -91,10 +93,35 @@ bash src/skills/shell/exploit/01-sqli-test.sh --target example.com >/dev/null
 bash src/skills/shell/report/01-export.sh --target example.com >/dev/null
 
 echo "[sanity] pipeline dry-run count"
-count=$(node src/bin/run-pipeline.js --target example.com --dry-run 2>/dev/null | wc -l | tr -d ' ')
-if [[ "$count" != "12" ]]; then
-  fail "expected 12 records, got $count"
+tmp_out="$(mktemp)"
+node src/bin/run-pipeline.js --target example.com --dry-run >/dev/null 2>"$tmp_out" || true
+rm -f "$tmp_out"
+
+echo "[sanity] pipeline dry-run JSONL parse"
+out="$(node src/bin/run-pipeline.js --target example.com --dry-run 2>/dev/null || true)"
+if [[ -z "$out" ]]; then
+  fail "pipeline produced no stdout records"
 fi
+echo "$out" | python3 - <<'PY'
+import json,sys
+bad=0
+for i,line in enumerate(sys.stdin.read().splitlines(),1):
+  line=line.strip()
+  if not line: continue
+  try:
+    o=json.loads(line)
+  except Exception:
+    bad+=1
+    continue
+  # minimal required fields
+  for k in ("type","tool","stage","target","ts","severity","evidence"):
+    if k not in o:
+      bad+=1
+      break
+if bad:
+  raise SystemExit(1)
+PY
+[[ "$?" == "0" ]] || fail "invalid jsonl records from pipeline"
 
 echo "[sanity] OK"
 echo "[sanity] Tip: para instalar dependencias/Faraday, rode: bash scripts/sanity.sh --howto" >&2

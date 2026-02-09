@@ -62,18 +62,25 @@ node src/bin/run-pipeline.js --target example.com --stage recon --dry-run
 
 **Todas as skills escrevem JSON Lines** (1 objeto JSON por linha) em stdout.
 
-Campos esperados:
+Campos esperados (minimo):
 - `type`: `asset` | `finding` | `note`
-- `target`: host/ip/dominio
+- `tool`: nome da ferramenta/skill que gerou o record (ex: `subfinder`, `httpx`, `nmap`, `markdown-report`)
+- `stage`: `recon` | `enum` | `exploit` | `report`
+- `target`: host/ip/dominio (ou asset relacionado)
+- `ts`: ISO 8601
+- `severity`: `info` | `low` | `med` | `high` | `crit`
+- `evidence`: array de strings (paths ou evidencias curtas)
+
+Campos recomendados:
 - `data`: objeto livre com informacoes do achado
-- `timestamp`: ISO 8601 (se nao vier, o runner/skills adicionam)
 - `source`: caminho do script (ex: `src/skills/nodejs/recon/01-passive-recon.js`)
 - `workspace` (opcional): pode vir no record, ou ser fornecido via `--workspace` no runner/ingest
+- `timestamp`: mantido por compatibilidade (o runner copia `ts` para `timestamp` quando necessario)
 
 Exemplo:
 
 ```json
-{"type":"finding","target":"example.com","data":{"category":"http-enum","endpoints":["/","/login"]},"timestamp":"2026-02-09T00:00:00Z","source":"src/skills/nodejs/enum/01-http-enum.js"}
+{"type":"finding","tool":"whatweb","stage":"enum","target":"example.com","ts":"2026-02-09T00:00:00Z","severity":"info","evidence":["data/runs/20260209T000000Z/evidence/enum/http/example.com.whatweb.txt"],"data":{"url":"https://example.com/"},"source":"src/skills/nodejs/enum/01-http-enum.js"}
 ```
 
 ## Orquestracao (pipeline)
@@ -145,12 +152,28 @@ Regras:
 ## Executando Skills Individualmente
 
 ```bash
-node src/skills/nodejs/recon/01-passive-recon.js --target example.com
-python3 src/skills/python/enum/01-port-scan.py --target example.com
-bash src/skills/shell/enum/01-dir-enum.sh --target example.com
+node src/skills/nodejs/recon/01-passive-recon.js --target example.com --out-dir data/runs/manual --scope-file data/scope.txt --timeout 20
+python3 src/skills/python/enum/01-port-scan.py --target example.com --out-dir data/runs/manual --scope-file data/scope.txt --timeout 120
+bash src/skills/shell/enum/01-dir-enum.sh --target example.com --out-dir data/runs/manual --scope-file data/scope.txt --rate 50 --timeout 30
 ```
 
 ## Sobre npm
 
 Se `npm` no seu ambiente apontar para o Windows (ex: WSL1), os scripts do `package.json` podem nao funcionar.
 Use os comandos diretos (`node ...`, `bash ...`) acima ou instale `npm` nativo dentro do Linux/WSL.
+
+## Pre-requisitos (Kali)
+
+As skills degradam graciosamente quando ferramentas nao existem (emitem `note` e pulam), mas para rodar o fluxo completo em ambiente Kali, instale pelo menos:
+- `subfinder`, `amass`, `assetfinder`
+- `dnsx`
+- `httpx`, `whatweb`, `sslscan`
+- `naabu` ou `nmap`
+- `ffuf`
+- `nuclei` (somente em `exploit` com gate)
+
+## Smoke Test
+
+```bash
+npm test
+```
