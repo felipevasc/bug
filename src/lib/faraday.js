@@ -22,6 +22,10 @@ function isIpv4(value) {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value || '');
 }
 
+function allowDummyIp() {
+  return process.env.FARADAY_ALLOW_DUMMY_IP === '1' || process.env.FARADAY_ALLOW_DUMMY_IP === 'true';
+}
+
 function baseUrlFromEnv() {
   const raw = process.env.FARADAY_URL;
   if (!raw) return null;
@@ -241,7 +245,12 @@ async function upsertHost(baseUrl, ws, headers, record) {
   }
 
   // If we still don't have an IP, keep Faraday happy and store the hostname.
-  if (!ip) ip = '0.0.0.0';
+  if (!ip) {
+    if (!allowDummyIp()) {
+      return { ok: false, status: 0, error: 'missing_ip', text: 'missing ip for hostname target (set FARADAY_RESOLVE_HOSTNAMES=true or FARADAY_ALLOW_DUMMY_IP=true)' };
+    }
+    ip = '0.0.0.0';
+  }
 
   const payload = {
     ip,
@@ -348,6 +357,17 @@ async function ingestRecord(record) {
 
   if (!record || !record.target) {
     return { skipped: true, reason: 'missing_target' };
+  }
+
+  // Avoid polluting Faraday with a shared dummy IP host for hostname-only records.
+  const resolveHostnames = process.env.FARADAY_RESOLVE_HOSTNAMES === '1' || process.env.FARADAY_RESOLVE_HOSTNAMES === 'true';
+  if (!allowDummyIp()) {
+    const data = (record && record.data) || {};
+    const target = String(record.target || '');
+    const hasIp = Boolean(data.ip) || isIpv4(target);
+    if (!hasIp && !resolveHostnames) {
+      return { skipped: true, reason: 'no_ip_for_hostname (set FARADAY_RESOLVE_HOSTNAMES=true or FARADAY_ALLOW_DUMMY_IP=true)' };
+    }
   }
 
   const hostRes = await upsertHost(baseUrl, ws, headers, record);
