@@ -83,8 +83,11 @@ async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
     urls.push(`https://${target}/`, `http://${target}/`);
   }
 
-  const uniqueUrls = Array.from(new Set(urls));
+  let uniqueUrls = Array.from(new Set(urls));
+
+  // If httpx is present but produced no output (DNS issues, WAF, etc.), try a curl-based fallback anyway.
   if (uniqueUrls.length === 0) {
+    uniqueUrls = [`https://${target}/`, `http://${target}/`];
     emitJsonl(emit, {
       type: 'note',
       tool: 'http-enum',
@@ -92,10 +95,9 @@ async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
       target,
       severity: 'info',
       evidence,
-      data: { message: 'no http endpoints detected' },
+      data: { message: 'httpx returned no URLs; using curl fallback candidates' },
       source: SOURCE
     });
-    return;
   }
 
   emitJsonl(emit, {
@@ -108,6 +110,25 @@ async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
     data: { urls: uniqueUrls },
     source: SOURCE
   });
+
+  // Always do a light curl HEAD check (gives something useful even when tooling is sparse).
+  for (const url of uniqueUrls.slice(0, 6)) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await runCmdCapture('bash', ['-lc', `timeout ${maxSecs}s curl -k -sS -I -L --max-time ${maxSecs} ${JSON.stringify(url)} | head -n 20 || true`]);
+    const p = writeEvidence(evDir, `${target}.${Buffer.from(url).toString('base64url')}.curl-head.txt`, res.stdout || '');
+    const m = (res.stdout || '').match(/^HTTP\/[0-9.]+\s+(\d+)/m);
+    const code = m ? Number(m[1]) : null;
+    emitJsonl(emit, {
+      type: 'finding',
+      tool: 'curl',
+      stage: STAGE,
+      target,
+      severity: code && code >= 400 ? 'low' : 'info',
+      evidence: [p],
+      data: { url, status_code: code },
+      source: SOURCE
+    });
+  }
 
   for (const url of uniqueUrls.slice(0, 20)) {
     // eslint-disable-next-line no-await-in-loop

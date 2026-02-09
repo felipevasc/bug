@@ -89,12 +89,12 @@ def hostname_in_scope(host, entry):
 def target_in_scope(target, entries):
     if not entries:
         return True
-    if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+$", target):
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", target):
         ip_int = ip_to_int(target)
         if ip_int is None:
             return False
         for e in entries:
-            if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+$", e) and e == target:
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", e) and e == target:
                 return True
             if "/" in e:
                 r = cidr_range(e)
@@ -102,7 +102,7 @@ def target_in_scope(target, entries):
                     return True
         return False
     for e in entries:
-        if "/" in e or re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+$", e):
+        if "/" in e or re.match(r"^\d+\.\d+\.\d+\.\d+$", e):
             continue
         if hostname_in_scope(target, e):
             return True

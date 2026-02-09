@@ -60,7 +60,7 @@ def target_in_scope(target, entries):
     for e in entries:
         if "/" in e:
             continue
-        if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+$", e):
+        if re.match(r"^\d+\.\d+\.\d+\.\d+$", e):
             continue
         if hostname_in_scope(target, e):
             return True
@@ -125,7 +125,7 @@ def main():
             if rr == "A":
                 for line in out.splitlines():
                     s = line.strip()
-                    if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+$", s):
+                    if re.match(r"^\d+\.\d+\.\d+\.\d+$", s):
                         ips.append(s)
         ev_path = ev_dir / f"{target}.dig.txt"
         ev_path.write_text("".join(txt_out), encoding="utf-8", errors="ignore")

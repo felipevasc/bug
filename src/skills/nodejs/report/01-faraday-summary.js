@@ -77,13 +77,52 @@ async function run({ target, emit, outDir, runTs }) {
   lines.push('');
   lines.push('## Findings');
   lines.push('');
-  lines.push('| Severity | Tool | Stage | Target | Evidence |');
-  lines.push('|---|---|---|---|---|');
+  lines.push('| Severity | Tool | Stage | Target | What | Evidence |');
+  lines.push('|---|---|---|---|---|---|');
   for (const f of findings) {
     const ev = Array.isArray(f.evidence) ? f.evidence : [];
     const evStr = ev.slice(0, 5).map((p) => `\`${mdEscape(p)}\``).join('<br>');
-    lines.push(`| ${mdEscape(f.severity)} | ${mdEscape(f.tool)} | ${mdEscape(f.stage)} | \`${mdEscape(f.target)}\` | ${evStr} |`);
+    const what = mdEscape(f.data ? JSON.stringify(f.data).slice(0, 180) : '');
+    lines.push(`| ${mdEscape(f.severity)} | ${mdEscape(f.tool)} | ${mdEscape(f.stage)} | \`${mdEscape(f.target)}\` | ${what} | ${evStr} |`);
   }
+  lines.push('');
+
+  // Extract useful summary even when tooling is missing and there are no "findings".
+  const dnsNotes = records.filter((r) => r && r.tool === 'dns-recon');
+  const dnsAssets = records.filter((r) => r && r.tool === 'dns' && r.type === 'asset');
+  const curlFindings = records.filter((r) => r && r.tool === 'curl' && r.type === 'finding');
+  const portNotes = records.filter((r) => r && r.tool === 'port-scan');
+
+  lines.push('## Useful extracted summary');
+  lines.push('');
+
+  if (dnsNotes.length || dnsAssets.length) {
+    const aRecs = [];
+    dnsNotes.forEach((n) => {
+      const arr = n.data && Array.isArray(n.data.a_records) ? n.data.a_records : [];
+      arr.forEach((ip) => aRecs.push(ip));
+    });
+    dnsAssets.forEach((a) => { if (a && a.target) aRecs.push(a.target); });
+    const uniq = Array.from(new Set(aRecs)).slice(0, 50);
+    lines.push(`- DNS A records (${uniq.length}): ${uniq.map((x) => `\`${mdEscape(x)}\``).join(' ') || '(none)'}`);
+  }
+
+  if (curlFindings.length) {
+    lines.push('- HTTP checks (curl -I):');
+    curlFindings.slice(0, 12).forEach((f) => {
+      const u = f.data && f.data.url ? f.data.url : '';
+      const sc = f.data && (f.data.status_code !== undefined) ? String(f.data.status_code) : '';
+      lines.push(`  - ${mdEscape(u)} → status ${mdEscape(sc)}`);
+    });
+  }
+
+  if (portNotes.length) {
+    const n = portNotes[0];
+    const ev = Array.isArray(n.evidence) ? n.evidence : [];
+    const nmapTxt = ev.find((p) => String(p).endsWith('.nmap.txt'));
+    if (nmapTxt) lines.push(`- Nmap output: \`${mdEscape(nmapTxt)}\``);
+  }
+
   lines.push('');
   lines.push('## Assets');
   lines.push('');
