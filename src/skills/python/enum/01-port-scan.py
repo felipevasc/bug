@@ -166,6 +166,29 @@ def main():
     open_ports = []
     evidence = []
 
+    # If target is a hostname, resolve A records first and scan IP(s) to avoid DNS-induced tool weirdness.
+    scan_targets = [target]
+    if not re.match(r"^\d+\.\d+\.\d+\.\d+$", target) and shutil.which("dig"):
+        _c, out, _e = run_capture(["dig", "+short", "A", target], min(timeout_s, 10))
+        ips = []
+        for line in (out or "").splitlines():
+            s = line.strip()
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", s):
+                ips.append(s)
+        ips = sorted(set(ips))
+        if ips:
+            scan_targets = ips[:3]
+            emit({
+                "type": "asset",
+                "tool": "dns",
+                "stage": stage,
+                "target": ips[0],
+                "severity": "info",
+                "evidence": [],
+                "data": {"resolved_from": target, "all_a": ips[:10]},
+                "source": source,
+            })
+
     if shutil.which("naabu"):
         out_jsonl = ev_dir / f"{target}.naabu.jsonl"
         cmd = ["naabu", "-host", target, "-silent", "-json"]
@@ -186,22 +209,41 @@ def main():
             if isinstance(p, int):
                 open_ports.append(p)
     elif shutil.which("nmap"):
-        out_gnmap = ev_dir / f"{target}.nmap.gnmap"
-        out_nmap = ev_dir / f"{target}.nmap.txt"
-        # Safe defaults: top ports + service detect, avoid super aggressive timing.
-        cmd = ["nmap", "-Pn", "-sV", "--top-ports", "1000", "-oG", str(out_gnmap), "-oN", str(out_nmap), target]
-        code, out, err = run_capture(cmd, timeout_s)
-        evidence += [str(out_gnmap), str(out_nmap)]
-        if out_gnmap.exists():
-            for line in out_gnmap.read_text(encoding="utf-8", errors="ignore").splitlines():
-                if "Ports:" not in line:
-                    continue
-                parts = line.split("Ports:", 1)[1]
-                for seg in parts.split(","):
-                    seg = seg.strip()
-                    m = re.match(r"^(\\d+)/open", seg)
-                    if m:
-                        open_ports.append(int(m.group(1)))
+        # Run nmap against each scan target (IP preferred). Keep it fast-ish.
+        for t in scan_targets:
+            suffix = t.replace("/", "_")
+            out_gnmap = ev_dir / f"{target}.{suffix}.nmap.gnmap"
+            out_nmap = ev_dir / f"{target}.{suffix}.nmap.txt"
+            out_err = ev_dir / f"{target}.{suffix}.nmap.stderr.txt"
+
+            cmd = [
+                "nmap",
+                "-Pn",
+                "-sV",
+                "--top-ports",
+                "200",
+                "--host-timeout",
+                f"{max(10, timeout_s)}s",
+                "-oG",
+                str(out_gnmap),
+                "-oN",
+                str(out_nmap),
+                t,
+            ]
+            code, out, err = run_capture(cmd, timeout_s)
+            out_err.write_text((err or "") + f"\n(exit={code})\n", encoding="utf-8", errors="ignore")
+            evidence += [str(out_gnmap), str(out_nmap), str(out_err)]
+
+            if out_gnmap.exists():
+                for line in out_gnmap.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if "Ports:" not in line:
+                        continue
+                    parts = line.split("Ports:", 1)[1]
+                    for seg in parts.split(","):
+                        seg = seg.strip()
+                        m = re.match(r"^(\d+)/open", seg)
+                        if m:
+                            open_ports.append(int(m.group(1)))
     else:
         emit({
             "type": "note",
