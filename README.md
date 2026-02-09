@@ -40,6 +40,12 @@ Sanity check local (nao precisa Faraday):
 bash scripts/sanity.sh
 ```
 
+How-to para instalar dependencias (inclui Faraday opcional):
+
+```bash
+bash scripts/sanity.sh --howto
+```
+
 Rodar pipeline em dry-run (gera JSONL no stdout):
 
 ```bash

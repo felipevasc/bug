@@ -7,9 +7,13 @@
  * Commands:
  * - list-hosts --workspace <ws>
  * - find-host --workspace <ws> --target <ip|hostname>
+ * - create-workspace --workspace <ws>
  */
 
-const { baseUrlFromEnv, authHeaders, listHosts } = require('../lib/faraday');
+const { loadEnv } = require('../lib/load-env');
+const { baseUrlFromEnv, authHeaders, listHosts, createWorkspace } = require('../lib/faraday');
+
+loadEnv();
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -32,6 +36,7 @@ function usage() {
   process.stderr.write('Usage:\n');
   process.stderr.write('  faraday-query list-hosts --workspace <ws>\n');
   process.stderr.write('  faraday-query find-host --workspace <ws> --target <ip|hostname>\n');
+  process.stderr.write('  faraday-query create-workspace --workspace <ws>\n');
 }
 
 function findHost(hosts, target) {
@@ -78,6 +83,17 @@ async function main() {
     }
 
     process.stdout.write(`${JSON.stringify(res.data)}\n`);
+    return;
+  }
+
+  if (cmd === 'create-workspace') {
+    const res = await createWorkspace(baseUrl, ws, headers, { description: 'Created by bugbounty-automation-hub' });
+    if (!res.ok) {
+      process.stderr.write(`Request failed (status ${res.status})\n`);
+      if (res.text) process.stderr.write(`${res.text}\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`${JSON.stringify(res.json || res.text || { ok: true })}\n`);
     return;
   }
 

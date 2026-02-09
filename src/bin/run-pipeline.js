@@ -11,7 +11,10 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
+
+loadEnv();
 
 function parseArgs(argv) {
   const args = { targets: [] };

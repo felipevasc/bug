@@ -6,10 +6,59 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+print_howto() {
+  cat <<'EOF'
+[sanity] How-to: instalar dependencias (inclui Faraday opcional)
+
+Minimo para rodar o sanity/pipeline (dry-run):
+- node
+- python3
+- bash
+
+Faraday (opcional)
+
+Opcao A: instalar o pacote .deb (amd64) da release 5.19.0:
+  wget -O /tmp/faraday-server_amd64.deb https://github.com/infobyte/faraday/releases/download/v5.19.0/faraday-server_amd64.deb
+  sudo dpkg -i /tmp/faraday-server_amd64.deb || sudo apt-get -f install
+
+Opcao B: instalar via venv + fonte (passos base):
+  pip3 install virtualenv
+  virtualenv faraday_venv
+  source faraday_venv/bin/activate
+  git clone git@github.com:infobyte/faraday.git
+  cd faraday
+  pip3 install .
+  faraday-manage initdb
+  faraday-server
+
+Dica: depois de subir o Faraday, configure:
+  FARADAY_URL (ex: http://127.0.0.1:5985)
+  FARADAY_WORKSPACE (workspace existente)
+  FARADAY_TOKEN ou FARADAY_USER/FARADAY_PASS
+EOF
+}
+
 fail() {
   echo "[sanity] FAIL: $*" >&2
+  echo "[sanity] Tip: rode 'bash scripts/sanity.sh --howto' para ver como instalar dependencias." >&2
   exit 1
 }
+
+if [[ "${1:-}" == "--howto" || "${1:-}" == "--deps" || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  case "${1:-}" in
+    --help|-h)
+      cat <<'EOF'
+Usage:
+  bash scripts/sanity.sh
+  bash scripts/sanity.sh --howto
+EOF
+      ;;
+    *)
+      print_howto
+      ;;
+  esac
+  exit 0
+fi
 
 command -v node >/dev/null 2>&1 || fail "node not found"
 command -v python3 >/dev/null 2>&1 || fail "python3 not found"
@@ -48,3 +97,4 @@ if [[ "$count" != "12" ]]; then
 fi
 
 echo "[sanity] OK"
+echo "[sanity] Tip: para instalar dependencias/Faraday, rode: bash scripts/sanity.sh --howto" >&2

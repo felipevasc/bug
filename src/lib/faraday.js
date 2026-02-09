@@ -132,26 +132,9 @@ async function tokenAuth(baseUrl) {
   const pass = process.env.FARADAY_PASS;
   if (!user || !pass) return null;
 
-  const basic = Buffer.from(`${user}:${pass}`).toString('base64');
-  const headers = { Authorization: `Basic ${basic}` };
-
-  // Faraday docs show /_api/v3/token/ but some deployments might not like trailing slash.
-  const urlA = joinUrl(baseUrl, '/_api/v3/token/');
-  const urlB = joinUrl(baseUrl, '/_api/v3/token');
-  const res = await requestWithFallback('POST', urlA, urlB, headers, null);
-
-  if (!res.ok) return null;
-
-  // Token endpoint returns plain text (JWT) in many versions.
-  const textToken = (res.text || '').trim();
-  if (textToken) return { Authorization: `Token ${textToken}` };
-
-  // Some versions might return JSON.
-  if (res.json && typeof res.json === 'object') {
-    const token = res.json.token || res.json.data || res.json.value;
-    if (typeof token === 'string' && token.trim()) return { Authorization: `Token ${token.trim()}` };
-  }
-
+  // NOTE: Token endpoints are highly version-dependent and some "authentication_token"
+  // values returned by Faraday are NOT JWTs; using them as Authorization can crash the API.
+  // Prefer cookie-based auth for broad compatibility.
   return null;
 }
 
@@ -162,12 +145,21 @@ async function cookieAuth(baseUrl) {
 
   const urlA = joinUrl(baseUrl, '/_api/login');
   const urlB = joinUrl(baseUrl, '/_api/login/');
-  const res = await requestWithFallback('POST', urlA, urlB, {}, { email: user, password: pass });
+  // Faraday's login handler may assume a User-Agent is present; ensure one to avoid 500s.
+  const res = await requestWithFallback(
+    'POST',
+    urlA,
+    urlB,
+    { 'User-Agent': 'bugbounty-automation-hub/0.1' },
+    { email: user, password: pass }
+  );
   if (!res.ok) return null;
 
   const cookies = res.headers['set-cookie'];
   if (!cookies || cookies.length === 0) return null;
 
+  // Keep using cookies: some Faraday versions expose an "authentication_token" in JSON that is not a JWT
+  // and will cause 500s if used as Authorization Token on v3 endpoints.
   return { Cookie: cookies.map((c) => c.split(';')[0]).join('; ') };
 }
 
@@ -204,6 +196,13 @@ async function listHosts(baseUrl, ws, headers) {
   const res = await requestWithFallback('GET', urlA, urlB, headers, null);
   if (!res.ok) return res;
   return { ...res, data: res.json };
+}
+
+async function createWorkspace(baseUrl, ws, headers, opts = {}) {
+  const urlA = joinUrl(baseUrl, '/_api/v3/ws');
+  const urlB = joinUrl(baseUrl, '/_api/v3/ws/');
+  const payload = { name: ws, description: opts.description || '' };
+  return requestWithFallback('POST', urlA, urlB, headers, payload);
 }
 
 function findHostIdInList(hosts, target) {
@@ -255,8 +254,9 @@ async function upsertHost(baseUrl, ws, headers, record) {
     owner: data.owner || ''
   };
 
-  const urlA = joinUrl(baseUrl, `/_api/v3/ws/${encodeURIComponent(ws)}/hosts/`);
-  const urlB = joinUrl(baseUrl, `/_api/v3/ws/${encodeURIComponent(ws)}/hosts`);
+  // Faraday accepts POST on the non-trailing-slash endpoint.
+  const urlA = joinUrl(baseUrl, `/_api/v3/ws/${encodeURIComponent(ws)}/hosts`);
+  const urlB = joinUrl(baseUrl, `/_api/v3/ws/${encodeURIComponent(ws)}/hosts/`);
   const res = await requestWithFallback('POST', urlA, urlB, headers, payload);
 
   if (res.ok) {
@@ -386,6 +386,7 @@ module.exports = {
   ingestRecord,
   request,
   listHosts,
+  createWorkspace,
   baseUrlFromEnv,
   authHeaders
 };

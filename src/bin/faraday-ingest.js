@@ -7,7 +7,10 @@
  */
 
 const fs = require('fs');
+const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
+
+loadEnv();
 
 function parseArgs(argv) {
   const args = {};
