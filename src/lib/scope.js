@@ -3,9 +3,34 @@
 
 const fs = require('fs');
 const net = require('net');
+const { URL } = require('url');
 
 function normalizeLine(s) {
   return String(s || '').trim();
+}
+
+function normalizeScopeEntry(raw) {
+  const line = normalizeLine(raw);
+  if (!line) return null;
+
+  // Accept common "scope" formats: URL, host:port, plain host, IP, CIDR.
+  try {
+    if (/^https?:\/\//i.test(line)) {
+      const u = new URL(line);
+      return (u.hostname || '').toLowerCase().replace(/\.$/, '');
+    }
+  } catch (_e) {
+    // fall through
+  }
+
+  // Strip path/query fragments if someone pasted a URL without scheme.
+  const noPath = line.split('/')[0];
+
+  // host:port -> host (IPv4/hostname only; repo doesn't claim IPv6 support)
+  const m = /^(.+):(\d{1,5})$/.exec(noPath);
+  if (m) return String(m[1]).toLowerCase().replace(/\.$/, '');
+
+  return String(noPath).toLowerCase().replace(/\.$/, '');
 }
 
 function isIp(s) {
@@ -22,7 +47,7 @@ function ipToInt(ip) {
 function cidrToRange(cidr) {
   const [ip, prefixStr] = cidr.split('/');
   const prefix = parseInt(prefixStr, 10);
-  if (!isIp(ip) || Number.isNaN(prefix) || prefix < 0 || prefix > 32) return null;
+  if (!isIp(ip) || net.isIP(ip) !== 4 || Number.isNaN(prefix) || prefix < 0 || prefix > 32) return null;
   const base = ipToInt(ip);
   if (base === null) return null;
   const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
@@ -48,7 +73,9 @@ function loadScopeFile(scopeFile) {
   const txt = fs.readFileSync(scopeFile, 'utf8');
   const entries = [];
   txt.split('\n').forEach((raw) => {
-    const line = normalizeLine(raw);
+    const trimmed = normalizeLine(raw);
+    if (!trimmed || trimmed.startsWith('#')) return;
+    const line = normalizeScopeEntry(trimmed);
     if (!line || line.startsWith('#')) return;
     entries.push(line);
   });
@@ -83,4 +110,3 @@ function targetInScope(target, entries) {
 }
 
 module.exports = { loadScopeFile, targetInScope };
-
