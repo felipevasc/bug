@@ -1,0 +1,6 @@
+# subdomains.txt
+# Subdomain labels (not full domains). Examples:
+# dev
+# staging
+# api
+# admin

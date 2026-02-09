@@ -1,0 +1,3 @@
+# api_endpoints.txt
+# Endpoint-like tokens extracted from JS/HTML (e.g. /api/v1/users).
+# One per line. Prefer leading slash.

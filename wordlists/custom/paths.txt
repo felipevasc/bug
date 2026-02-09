@@ -1,0 +1,7 @@
+# paths.txt
+# Curated paths/filenames discovered over time.
+# One token per line (no leading slash).
+# Example:
+# admin
+# api
+# .well-known

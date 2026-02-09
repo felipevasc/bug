@@ -103,8 +103,11 @@ else
   base="http://${TARGET}"
 fi
 
-wordlist="/usr/share/wordlists/dirb/common.txt"
-wordlist="/usr/share/seclists/Discovery/Web-Content/common.txt"
+# Prefer repo-curated wordlist if present; otherwise fallback to SecLists.
+wordlist="wordlists/custom/paths.txt"
+if [[ ! -f "$wordlist" ]]; then
+  wordlist="/usr/share/seclists/Discovery/Web-Content/common.txt"
+fi
 if [[ ! -f "$wordlist" ]]; then
   wordlist="/usr/share/wordlists/dirb/common.txt"
 fi
