@@ -118,7 +118,11 @@ fi
 rm -f "$tmp_out"
 
 echo "[sanity] pipeline dry-run JSONL parse"
-out="$(node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null || true)"
+if command -v timeout >/dev/null 2>&1; then
+  out="$(timeout 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null || true)"
+else
+  out="$(node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null || true)"
+fi
 if [[ -z "$out" ]]; then
   fail "pipeline produced no stdout records"
 fi
