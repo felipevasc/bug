@@ -103,11 +103,11 @@ fi
 
 echo "[sanity] pipeline dry-run count"
 tmp_out="$(mktemp)"
-node src/bin/run-pipeline.js --target example.com --dry-run >/dev/null 2>"$tmp_out" || true
+node src/bin/run-pipeline.js --target example.com --dry-run --timeout 5 >/dev/null 2>"$tmp_out" || true
 rm -f "$tmp_out"
 
 echo "[sanity] pipeline dry-run JSONL parse"
-out="$(node src/bin/run-pipeline.js --target example.com --dry-run 2>/dev/null || true)"
+out="$(node src/bin/run-pipeline.js --target example.com --dry-run --timeout 5 2>/dev/null || true)"
 if [[ -z "$out" ]]; then
   fail "pipeline produced no stdout records"
 fi
