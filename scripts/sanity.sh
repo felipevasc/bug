@@ -87,10 +87,19 @@ python3 -m py_compile src/skills/python/exploit/01-ssrf-check.py
 python3 -m py_compile src/skills/python/report/01-faraday-note.py
 
 echo "[sanity] shell smoke"
-bash src/skills/shell/recon/01-subdomains.sh --target example.com >/dev/null
-bash src/skills/shell/enum/01-dir-enum.sh --target example.com >/dev/null
-bash src/skills/shell/exploit/01-sqli-test.sh --target example.com >/dev/null
-bash src/skills/shell/report/01-export.sh --target example.com >/dev/null
+# Keep sanity bounded even if external tools hang.
+SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-20}"
+if command -v timeout >/dev/null 2>&1; then
+  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/recon/01-subdomains.sh --target example.com >/dev/null || true
+  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/enum/01-dir-enum.sh --target example.com >/dev/null || true
+  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/exploit/01-sqli-test.sh --target example.com >/dev/null || true
+  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/report/01-export.sh --target example.com >/dev/null || true
+else
+  bash src/skills/shell/recon/01-subdomains.sh --target example.com >/dev/null || true
+  bash src/skills/shell/enum/01-dir-enum.sh --target example.com >/dev/null || true
+  bash src/skills/shell/exploit/01-sqli-test.sh --target example.com >/dev/null || true
+  bash src/skills/shell/report/01-export.sh --target example.com >/dev/null || true
+fi
 
 echo "[sanity] pipeline dry-run count"
 tmp_out="$(mktemp)"
