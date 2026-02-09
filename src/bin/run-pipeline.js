@@ -163,7 +163,7 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
   }
 
   try {
-    await Promise.resolve(run({
+    const runPromise = Promise.resolve(run({
       target,
       emit: emitRecord,
       outDir: opts.outDir,
@@ -173,10 +173,40 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
       allowExploit: opts.allowExploit,
       runTs: opts.runTs
     }));
+
+    const t = Number(opts.timeout || process.env.TIMEOUT || 0);
+    if (Number.isFinite(t) && t > 0) {
+      await Promise.race([
+        runPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`runner-timeout: ${t}s`)), t * 1000))
+      ]);
+    } else {
+      await runPromise;
+    }
+
     return { ok: true, code: 0, emitted, parseErrors: 0, stderr: '' };
   } catch (err) {
     const msg = err && err.stack ? err.stack : String(err);
     process.stderr.write(`[runner] node skill failed: ${skillPath}: ${msg}\n`);
+
+    if (String(msg).includes('runner-timeout:')) {
+      const t = Number(opts.timeout || process.env.TIMEOUT || 0);
+      const record = buildPayload({
+        type: 'note',
+        tool: 'runner-timeout',
+        stage: opts.stage || 'unknown',
+        target,
+        severity: 'info',
+        evidence: [],
+        data: { timed_out: true, timeout_sec: t, kind: 'node_in_process' },
+        source: 'src/bin/run-pipeline.js',
+        workspace: opts.workspace
+      });
+      process.stdout.write(`${JSON.stringify(record)}\n`);
+      if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
+      if (!opts.dryRun) void ingestRecord(record);
+    }
+
     return { ok: false, code: 1, emitted, parseErrors: 0, stderr: msg };
   }
 }
