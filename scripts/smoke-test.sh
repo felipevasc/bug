@@ -15,7 +15,7 @@ EOF
 
 echo "[smoke] out_dir=$out_dir" >&2
 
-jsonl="$(node src/bin/run-pipeline.js --target example.com --dry-run --out-dir "$out_dir" --scope-file "$scope_file" 2>/dev/null || true)"
+jsonl="$(RUN_TS="$run_ts" node src/bin/run-pipeline.js --target example.com --dry-run --out-dir "$out_dir" --scope-file "$scope_file" --timeout 3 --rate 5 || true)"
 if [[ -z "$jsonl" ]]; then
   echo "[smoke] FAIL: no JSONL output" >&2
   exit 1
