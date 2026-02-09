@@ -12,7 +12,8 @@
     {
       "name": "enum",
       "skills": [
-        "../src/skills/nodejs/enum/01-http-enum.js"
+        "../src/skills/nodejs/enum/01-http-enum.js",
+        "../src/skills/shell/enum/02-crawl-wget.sh"
       ]
     },
     {

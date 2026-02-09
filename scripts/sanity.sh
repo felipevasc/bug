@@ -80,6 +80,12 @@ node --check src/skills/nodejs/enum/01-http-enum.js
 node --check src/skills/nodejs/exploit/01-proof-of-concept.js
 node --check src/skills/nodejs/report/01-faraday-summary.js
 
+# Wordlists & crawl tooling
+node --check scripts/validate-jsonl.js
+python3 -m py_compile scripts/wordlists/extract_paths_from_ffuf.py
+python3 -m py_compile scripts/wordlists/extract_from_js.py
+bash -n src/skills/shell/enum/02-crawl-wget.sh
+
 echo "[sanity] python compile"
 python3 -m py_compile src/skills/python/recon/01-dns-recon.py
 python3 -m py_compile src/skills/python/enum/01-port-scan.py
@@ -102,8 +108,13 @@ else
 fi
 
 echo "[sanity] pipeline dry-run count"
+# Guard against hangs even if runner timeouts don't fully interrupt in-process skills.
 tmp_out="$(mktemp)"
-node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 >/dev/null 2>"$tmp_out" || true
+if command -v timeout >/dev/null 2>&1; then
+  timeout 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json >/dev/null 2>"$tmp_out" || true
+else
+  node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json >/dev/null 2>"$tmp_out" || true
+fi
 rm -f "$tmp_out"
 
 echo "[sanity] pipeline dry-run JSONL parse"
