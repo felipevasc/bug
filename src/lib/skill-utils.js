@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { normalizeRecord } = require('./schema');
 
 function nowIso() {
   return new Date().toISOString();
@@ -38,12 +39,10 @@ function parseCommonArgs(argv) {
 }
 
 function emitJsonl(emit, record) {
-  emit({
-    ts: record.ts || nowIso(),
-    severity: record.severity || 'info',
-    evidence: record.evidence || [],
-    ...record
+  const normalized = normalizeRecord(record, {
+    ts: record && (record.ts || record.timestamp) ? (record.ts || record.timestamp) : nowIso()
   });
+  emit(normalized);
 }
 
 function runCmdCapture(cmd, argv, opts = {}) {
@@ -76,4 +75,3 @@ module.exports = {
   runCmdCapture,
   writeEvidence
 };
-
