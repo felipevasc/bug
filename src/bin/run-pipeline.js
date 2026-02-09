@@ -218,6 +218,18 @@ async function runSkillOnce(skillPath, target, opts) {
     }
   });
 
+  // Runner-level timeout guard to avoid hanging tools.
+  const killAfterSecs = Number(opts.timeout || process.env.TIMEOUT || 0);
+  let killedByTimeout = false;
+  let killTimer = null;
+  if (Number.isFinite(killAfterSecs) && killAfterSecs > 0) {
+    killTimer = setTimeout(() => {
+      killedByTimeout = true;
+      try { child.kill('SIGTERM'); } catch (_e) { /* ignore */ }
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch (_e2) { /* ignore */ } }, 500);
+    }, killAfterSecs * 1000);
+  }
+
   let outBuf = '';
   let errBuf = '';
   let parseErrors = 0;
@@ -266,6 +278,26 @@ async function runSkillOnce(skillPath, target, opts) {
   });
 
   const code = await new Promise((resolve) => child.on('close', resolve));
+
+  if (killTimer) clearTimeout(killTimer);
+
+  if (killedByTimeout) {
+    const record = buildPayload({
+      type: 'note',
+      tool: 'runner-timeout',
+      stage: opts.stage || 'unknown',
+      target,
+      severity: 'info',
+      evidence: [],
+      data: { timed_out: true, timeout_sec: killAfterSecs, cmd, argv },
+      source: 'src/bin/run-pipeline.js',
+      workspace: opts.workspace
+    });
+    process.stdout.write(`${JSON.stringify(record)}\n`);
+    if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
+    if (!opts.dryRun) void ingestRecord(record);
+    return { ok: false, code: code || 124, emitted, parseErrors, stderr: (errBuf || 'timeout') };
+  }
 
   if (outBuf.trim().length > 0) {
     const parsed = safeJsonParse(outBuf.trim());
@@ -351,7 +383,7 @@ async function main() {
 
   for (const stage of selectedStages) {
     if (stage && stage.name === 'exploit') {
-      const okGate = Boolean(args.allowExploit) && String(args.confirm || '') === 'arrocha!';
+      const okGate = Boolean(args.allowExploit);
       if (!okGate) {
         const record = buildPayload({
           type: 'note',
@@ -360,14 +392,14 @@ async function main() {
           target: stageTargets[0] || args.targets[0] || '',
           severity: 'info',
           evidence: [],
-          data: { intrusive_actions: 'blocked', required: '--allow-exploit + --confirm arrocha!' },
+          data: { intrusive_actions: 'blocked', required: '--allow-exploit' },
           source: 'src/bin/run-pipeline.js',
           workspace: args.workspace
         });
         process.stdout.write(`${JSON.stringify(record)}\n`);
         recordsStream.write(`${JSON.stringify(record)}\n`);
         if (!args.dryRun) void ingestRecord(record);
-        process.stderr.write('[runner] exploit stage blocked (missing --allow-exploit and/or --confirm)\n');
+        process.stderr.write('[runner] exploit stage blocked (missing --allow-exploit)\n');
         continue;
       }
     }
