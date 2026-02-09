@@ -14,6 +14,8 @@ function asArray(value) {
 function normalizeSeverity(value) {
   const s = String(value || '').toLowerCase();
   if (!s) return 'info';
+  if (s === 'med') return 'medium';
+  if (s === 'crit') return 'critical';
   if (['info', 'low', 'medium', 'high', 'critical'].includes(s)) return s;
   return 'info';
 }
@@ -45,4 +47,3 @@ function normalizeRecord(raw, defaults = {}) {
 module.exports = {
   normalizeRecord
 };
-
