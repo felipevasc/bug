@@ -114,10 +114,12 @@ for i,line in enumerate(sys.stdin.read().splitlines(),1):
     bad+=1
     continue
   # minimal required fields
-  for k in ("type","tool","stage","target","ts","severity","evidence"):
+  for k in ("type","tool","stage","target","ts","timestamp","severity","evidence"):
     if k not in o:
       bad+=1
       break
+  if "evidence" in o and not isinstance(o["evidence"], list):
+    bad+=1
 if bad:
   raise SystemExit(1)
 PY
