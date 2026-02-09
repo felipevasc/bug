@@ -331,6 +331,28 @@ async function main() {
   }
 
   for (const stage of selectedStages) {
+    if (stage && stage.name === 'exploit') {
+      const okGate = Boolean(args.allowExploit) && String(args.confirm || '') === 'arrocha!';
+      if (!okGate) {
+        const record = buildPayload({
+          type: 'note',
+          tool: 'exploit-gate',
+          stage: 'exploit',
+          target: stageTargets[0] || args.targets[0] || '',
+          severity: 'info',
+          evidence: [],
+          data: { intrusive_actions: 'blocked', required: '--allow-exploit + --confirm arrocha!' },
+          source: 'src/bin/run-pipeline.js',
+          workspace: args.workspace
+        });
+        process.stdout.write(`${JSON.stringify(record)}\n`);
+        recordsStream.write(`${JSON.stringify(record)}\n`);
+        if (!args.dryRun) void ingestRecord(record);
+        process.stderr.write('[runner] exploit stage blocked (missing --allow-exploit and/or --confirm)\n');
+        continue;
+      }
+    }
+
     const skills = Array.isArray(stage.skills) ? stage.skills : [];
     const discovered = new Set();
     const onRecord = (rec) => {
