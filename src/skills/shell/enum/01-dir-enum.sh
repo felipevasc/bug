@@ -48,6 +48,7 @@ if [[ -z "$TARGET" ]]; then
 fi
 
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TIMESTAMP="$TS"
 RUN_TS="${RUN_TS:-}"
 if [[ -z "$RUN_TS" ]]; then RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"; fi
 ROOT_OUT="${OUT_DIR:-}"
@@ -61,8 +62,8 @@ emit_note() {
   local tool="$1"; shift
   local sev="$1"; shift
   local msg="$1"; shift
-  printf '{"type":"note","tool":"%s","stage":"enum","target":"%s","ts":"%s","severity":"%s","evidence":%s,"data":{"message":"%s"},"source":"src/skills/shell/enum/01-dir-enum.sh"}\n' \
-    "$tool" "$TARGET" "$TS" "$sev" "[]" "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip())[1:-1])')"
+  printf '{"type":"note","tool":"%s","stage":"enum","target":"%s","ts":"%s","timestamp":"%s","severity":"%s","evidence":%s,"data":{"message":"%s"},"source":"src/skills/shell/enum/01-dir-enum.sh"}\n' \
+    "$tool" "$TARGET" "$TS" "$TIMESTAMP" "$sev" "[]" "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip())[1:-1])')"
 }
 
 in_scope() {
@@ -103,8 +104,9 @@ else
 fi
 
 wordlist="/usr/share/wordlists/dirb/common.txt"
+wordlist="/usr/share/seclists/Discovery/Web-Content/common.txt"
 if [[ ! -f "$wordlist" ]]; then
-  wordlist="/usr/share/seclists/Discovery/Web-Content/common.txt"
+  wordlist="/usr/share/wordlists/dirb/common.txt"
 fi
 if [[ ! -f "$wordlist" ]]; then
   emit_note "wordlist" "info" "no common wordlist found; skipping"
@@ -113,25 +115,56 @@ fi
 
 if command -v ffuf >/dev/null 2>&1; then
   out_json="${EV_DIR}/${TARGET}.ffuf.json"
-  timeout "${TIMEOUT}s" ffuf -u "${base}/FUZZ" -w "$wordlist" -ac -t 40 -rate "$RATE" -timeout "${TIMEOUT}" -of json -o "$out_json" >/dev/null 2>&1 || true
+  timeout "${TIMEOUT}s" ffuf -u "${base}/FUZZ" -w "$wordlist" -ac -t 20 -rate "$RATE" -timeout "${TIMEOUT}" -of json -o "$out_json" >/dev/null 2>&1 || true
   if [[ -s "$out_json" ]]; then
-    # Extract a few interesting hits for JSONL record.
-    hits="$(python3 - "$out_json" <<'PY'
+    # Extract interesting hits (2xx, 3xx, 401, 403) and emit one finding per hit.
+    hits_tsv="${EV_DIR}/${TARGET}.ffuf.interesting.tsv"
+    hits_txt="${EV_DIR}/${TARGET}.ffuf.interesting.txt"
+    python3 - "$out_json" "$hits_tsv" "$hits_txt" <<'PY'
 import json,sys
+from pathlib import Path
 p=sys.argv[1]
+tsv=Path(sys.argv[2])
+txt=Path(sys.argv[3])
 try:
   d=json.load(open(p,'r',encoding='utf-8',errors='ignore'))
   res=d.get('results') or []
-  out=[]
-  for r in res[:50]:
-    out.append({"url":r.get("url"),"status":r.get("status"),"length":r.get("length")})
-  print(json.dumps(out))
+  interesting=[]
+  for r in res:
+    url=r.get("url")
+    st=r.get("status")
+    ln=r.get("length")
+    if not url or st is None:
+      continue
+    try:
+      st_i=int(st)
+    except Exception:
+      continue
+    if (200 <= st_i < 300) or (300 <= st_i < 400) or st_i in (401,403):
+      interesting.append((st_i, url, ln if ln is not None else ""))
+  # Stable output order: status then URL
+  interesting.sort(key=lambda x: (x[0], x[1]))
+  tsv.write_text("\n".join([f\"{st}\\t{url}\\t{ln}\" for st,url,ln in interesting]) + (\"\\n\" if interesting else \"\"), encoding=\"utf-8\", errors=\"ignore\")
+  txt.write_text(\"\\n\".join([f\"{st} {url}\" for st,url,_ in interesting]) + (\"\\n\" if interesting else \"\"), encoding=\"utf-8\", errors=\"ignore\")
 except Exception:
-  print("[]")
+  tsv.write_text(\"\", encoding=\"utf-8\", errors=\"ignore\")
+  txt.write_text(\"\", encoding=\"utf-8\", errors=\"ignore\")
 PY
-)"
-    printf '{"type":"finding","tool":"ffuf","stage":"enum","target":"%s","ts":"%s","severity":"info","evidence":["%s"],"data":{"base":"%s","hits":%s},"source":"src/skills/shell/enum/01-dir-enum.sh"}\n' \
-      "$TARGET" "$TS" "$out_json" "$base" "$hits"
+
+    while IFS=$'\t' read -r status url length; do
+      [[ -z "${url:-}" ]] && continue
+      sev="info"
+      if [[ "$status" == "401" || "$status" == "403" ]]; then sev="low"; fi
+      if [[ "$status" =~ ^3 ]]; then sev="info"; fi
+      printf '{"type":"finding","tool":"ffuf","stage":"enum","target":"%s","ts":"%s","timestamp":"%s","severity":"%s","evidence":["%s","%s","%s"],"data":{"kind":"interesting_path","base":"%s","url":"%s","status":%s,"length":%s},"source":"src/skills/shell/enum/01-dir-enum.sh"}\n' \
+        "$TARGET" "$TS" "$TIMESTAMP" "$sev" "$out_json" "$hits_txt" "$hits_tsv" "$base" \
+        "$(printf '%s' "$url" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip())[1:-1])')" \
+        "$(printf '%s' "$status" | python3 -c 'import sys; s=sys.stdin.read().strip(); print(s if s else "null")')" \
+        "$(printf '%s' "${length:-}" | python3 -c 'import sys; s=sys.stdin.read().strip(); print(s if s else "null")')"
+    done < "$hits_tsv"
+
+    cnt="$(wc -l <"$hits_tsv" | tr -d ' ')"
+    emit_note "ffuf" "info" "ffuf interesting results: ${cnt} (see evidence)"
   else
     emit_note "ffuf" "info" "ffuf produced no output"
   fi
