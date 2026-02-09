@@ -12,3 +12,8 @@ yarn-error.log*
 /data/*.jsonl
 /data/runs/
 /data/tmp/
+/data/reports/
+
+# Python
+__pycache__/
+*.pyc

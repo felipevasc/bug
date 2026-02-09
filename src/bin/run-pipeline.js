@@ -31,6 +31,30 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (key === '--out-dir' && val) {
+      args.outDir = val;
+      i += 1;
+      continue;
+    }
+    if (key === '--scope-file' && val) {
+      args.scopeFile = val;
+      i += 1;
+      continue;
+    }
+    if (key === '--rate' && val) {
+      args.rate = val;
+      i += 1;
+      continue;
+    }
+    if (key === '--timeout' && val) {
+      args.timeout = val;
+      i += 1;
+      continue;
+    }
+    if (key === '--allow-exploit') {
+      args.allowExploit = true;
+      continue;
+    }
     if (key === '--stage' && val) {
       args.stage = val;
       i += 1;
@@ -60,6 +84,23 @@ function detectRunner(skillPath) {
   return { kind: 'raw', path: skillPath };
 }
 
+function ensureDir(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function nowStamp() {
+  // Filesystem-safe UTC timestamp: 20260209T072812Z
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+  const mm = pad(d.getUTCMonth() + 1);
+  const dd = pad(d.getUTCDate());
+  const hh = pad(d.getUTCHours());
+  const mi = pad(d.getUTCMinutes());
+  const ss = pad(d.getUTCSeconds());
+  return `${yyyy}${mm}${dd}T${hh}${mi}${ss}Z`;
+}
+
 function readJsonlLines(chunk, buffer) {
   const data = buffer + chunk;
   const lines = data.split('\n');
@@ -87,6 +128,8 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
 
   let emitted = 0;
   function emitRecord(raw) {
+    // Prefer ts but keep timestamp for existing ingest/Faraday behavior.
+    if (raw && raw.ts && !raw.timestamp) raw.timestamp = raw.ts;
     const record = buildPayload({
       ...raw,
       target: raw && raw.target ? raw.target : target,
@@ -96,12 +139,22 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
 
     emitted += 1;
     process.stdout.write(`${JSON.stringify(record)}\n`);
+    if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
     if (typeof opts.onRecord === 'function') opts.onRecord(record);
     if (!opts.dryRun) void ingestRecord(record);
   }
 
   try {
-    await Promise.resolve(run({ target, emit: emitRecord }));
+    await Promise.resolve(run({
+      target,
+      emit: emitRecord,
+      outDir: opts.outDir,
+      scopeFile: opts.scopeFile,
+      rate: opts.rate,
+      timeout: opts.timeout,
+      allowExploit: opts.allowExploit,
+      runTs: opts.runTs
+    }));
     return { ok: true, code: 0, emitted, parseErrors: 0, stderr: '' };
   } catch (err) {
     const msg = err && err.stack ? err.stack : String(err);
@@ -130,9 +183,20 @@ async function runSkillOnce(skillPath, target, opts) {
     argv = ['--target', target];
   }
 
+  if (opts.outDir) argv.push('--out-dir', String(opts.outDir));
+  if (opts.scopeFile) argv.push('--scope-file', String(opts.scopeFile));
+  if (opts.rate) argv.push('--rate', String(opts.rate));
+  if (opts.timeout) argv.push('--timeout', String(opts.timeout));
+  if (opts.allowExploit) argv.push('--allow-exploit');
+
   const child = spawn(cmd, argv, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: process.env
+    env: {
+      ...process.env,
+      RUN_TS: opts.runTs || process.env.RUN_TS || '',
+      OUT_DIR: opts.outDir || process.env.OUT_DIR || '',
+      SCOPE_FILE: opts.scopeFile || process.env.SCOPE_FILE || ''
+    }
   });
 
   let outBuf = '';
@@ -157,6 +221,7 @@ async function runSkillOnce(skillPath, target, opts) {
         continue;
       }
 
+      if (parsed.value && parsed.value.ts && !parsed.value.timestamp) parsed.value.timestamp = parsed.value.ts;
       const record = buildPayload({
         ...parsed.value,
         target: parsed.value.target || target,
@@ -166,6 +231,7 @@ async function runSkillOnce(skillPath, target, opts) {
 
       emitted += 1;
       process.stdout.write(`${JSON.stringify(record)}\n`);
+      if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
       if (typeof opts.onRecord === 'function') opts.onRecord(record);
       if (!opts.dryRun) void ingestRecord(record);
     }
@@ -182,6 +248,7 @@ async function runSkillOnce(skillPath, target, opts) {
   if (outBuf.trim().length > 0) {
     const parsed = safeJsonParse(outBuf.trim());
     if (parsed.ok) {
+      if (parsed.value && parsed.value.ts && !parsed.value.timestamp) parsed.value.timestamp = parsed.value.ts;
       const record = buildPayload({
         ...parsed.value,
         target: parsed.value.target || target,
@@ -190,6 +257,7 @@ async function runSkillOnce(skillPath, target, opts) {
       });
       emitted += 1;
       process.stdout.write(`${JSON.stringify(record)}\n`);
+      if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
       if (typeof opts.onRecord === 'function') opts.onRecord(record);
       if (!opts.dryRun) void ingestRecord(record);
     } else {
@@ -208,9 +276,15 @@ async function main() {
   const pipelinePath = args.pipeline || 'pipeline.json';
 
   if (args.targets.length === 0) {
-    process.stderr.write('Usage: run-pipeline --target <t> [--target <t2>] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--dry-run] [--strict]\n');
+    process.stderr.write('Usage: run-pipeline --target <t> [--target <t2>] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec] [--allow-exploit] [--dry-run] [--strict]\n');
     process.exit(1);
   }
+
+  const runTs = nowStamp();
+  const outDir = args.outDir ? path.resolve(args.outDir) : path.resolve('data', 'runs', runTs);
+  ensureDir(outDir);
+  const recordsPath = path.join(outDir, 'records.jsonl');
+  const recordsStream = fs.createWriteStream(recordsPath, { flags: 'a' });
 
   const abs = path.resolve(pipelinePath);
   const pipelineDir = path.dirname(abs);
@@ -251,7 +325,20 @@ async function main() {
       for (const target of stageTargets) {
         process.stderr.write(`[runner] stage=${stage.name} skill=${skillRef} target=${target}\n`);
         // eslint-disable-next-line no-await-in-loop
-        const res = await runSkillOnce(skillPath, target, { dryRun: args.dryRun, strict: args.strict, workspace: args.workspace, sourceFallback: skillRef, onRecord });
+        const res = await runSkillOnce(skillPath, target, {
+          dryRun: args.dryRun,
+          strict: args.strict,
+          workspace: args.workspace,
+          sourceFallback: skillRef,
+          onRecord,
+          outDir,
+          scopeFile: args.scopeFile,
+          rate: args.rate,
+          timeout: args.timeout,
+          allowExploit: args.allowExploit,
+          runTs,
+          recordsStream
+        });
         if (!res.ok && pipeline.options && pipeline.options.stop_on_error) {
           process.stderr.write(`[runner] stopping on error: ${skillRef} (code ${res.code})\n`);
           process.exit(res.code || 1);
@@ -265,6 +352,10 @@ async function main() {
       stageTargets = Array.from(next);
     }
   }
+
+  recordsStream.end();
+  process.stderr.write(`[runner] outDir=${outDir}\n`);
+  process.stderr.write(`[runner] records=${recordsPath}\n`);
 }
 
 main().catch((err) => {
