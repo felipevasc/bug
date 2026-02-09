@@ -12,6 +12,8 @@ All skills must write **JSONL** to stdout (1 JSON object per line). No logs in s
 - `timestamp`: ISO 8601 timestamp (string). Kept for compatibility; usually equals `ts`.
 - `severity`: `info` | `low` | `medium` | `high` | `critical`
 - `evidence`: array (can be empty). Prefer small text snippets and paths to saved artifacts.
+- `source`: string path (e.g. `src/skills/python/enum/01-port-scan.py`)
+- `data`: object (free-form payload; must exist even if `{}`)
 
 ## Common optional fields
 

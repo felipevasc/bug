@@ -22,7 +22,7 @@ function normalizeSeverity(value) {
 
 /**
  * Normalize a JSONL record to ensure the pipeline schema keys exist.
- * Required keys (repo invariant): type, tool, stage, target, ts, timestamp, severity, evidence
+ * Required keys (repo invariant): type, tool, stage, target, ts, timestamp, severity, evidence, source, data
  */
 function normalizeRecord(raw, defaults = {}) {
   const r = raw && typeof raw === 'object' ? { ...raw } : {};
@@ -40,6 +40,11 @@ function normalizeRecord(raw, defaults = {}) {
   // Triage
   r.severity = normalizeSeverity(r.severity || defaults.severity);
   r.evidence = asArray(r.evidence || defaults.evidence);
+
+  // Required extras
+  r.source = String(r.source || defaults.source || '');
+  if (!r.source) r.source = String(defaults.source || defaults.tool || r.tool || 'unknown');
+  if (!r.data || typeof r.data !== 'object' || Array.isArray(r.data)) r.data = {};
 
   return r;
 }

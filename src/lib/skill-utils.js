@@ -40,7 +40,8 @@ function parseCommonArgs(argv) {
 
 function emitJsonl(emit, record) {
   const normalized = normalizeRecord(record, {
-    ts: record && (record.ts || record.timestamp) ? (record.ts || record.timestamp) : nowIso()
+    ts: record && (record.ts || record.timestamp) ? (record.ts || record.timestamp) : nowIso(),
+    source: record && record.source ? record.source : 'src/lib/skill-utils.js'
   });
   emit(normalized);
 }

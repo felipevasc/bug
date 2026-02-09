@@ -24,7 +24,7 @@ function parseArgs(argv) {
   return args;
 }
 
-const REQUIRED = ['type', 'tool', 'stage', 'target', 'ts', 'timestamp', 'severity', 'evidence'];
+const REQUIRED = ['type', 'tool', 'stage', 'target', 'ts', 'timestamp', 'severity', 'evidence', 'source', 'data'];
 
 function validateObj(obj) {
   if (!obj || typeof obj !== 'object') return 'not_object';
@@ -32,6 +32,8 @@ function validateObj(obj) {
     if (!(k in obj)) return `missing_${k}`;
   }
   if (!Array.isArray(obj.evidence)) return 'evidence_not_array';
+  if (typeof obj.source !== 'string' || obj.source.length === 0) return 'source_not_string';
+  if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) return 'data_not_object';
   return null;
 }
 
