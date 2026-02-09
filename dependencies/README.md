@@ -21,6 +21,9 @@ Esta pasta descreve e automatiza a instalacao das dependencias que o pipeline us
 ### Vulnerability scanning (opcional, mas muito util)
 - `nuclei` + `nuclei-templates`
 
+### PDF Report (bonito)
+- `wkhtmltopdf` (converte `report.html` -> `report.pdf`)
+
 ### Faraday (opcional)
 - `faraday` + `postgresql` + `redis-server`
 

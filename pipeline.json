@@ -35,6 +35,7 @@
       "name": "report",
       "skills": [
         "src/skills/nodejs/report/01-faraday-summary.js",
+        "src/skills/nodejs/report/02-pdf-report.js",
         "src/skills/python/report/01-faraday-note.py",
         "src/skills/shell/report/01-export.sh"
       ]

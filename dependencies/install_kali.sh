@@ -288,7 +288,10 @@ if [[ -n "$SUDO" ]]; then
     dnsutils \
     nmap sslscan whatweb \
     python3 python3-venv python3-pip \
-    coreutils # provides the `timeout` binary; there is no `timeout` apt package on Kali
+    coreutils \
+    wkhtmltopdf \
+    fonts-dejavu-core \
+    fonts-liberation # coreutils provides the `timeout` binary; wkhtmltopdf generates PDF reports
 else
   echo "[deps] skipping apt base package install (no sudo available)" >&2
   command -v curl >/dev/null 2>&1 || { echo "[deps] ERROR: curl is required but missing." >&2; exit 1; }
