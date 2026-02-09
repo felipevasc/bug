@@ -216,12 +216,14 @@ def main():
             out_nmap = ev_dir / f"{target}.{suffix}.nmap.txt"
             out_err = ev_dir / f"{target}.{suffix}.nmap.stderr.txt"
 
+            # For validation runs, keep it very bounded. Use a small port set (80/443/etc.)
+            ports = "80,443,8080,8443,22,25,53"
             cmd = [
                 "nmap",
                 "-Pn",
                 "-sV",
-                "--top-ports",
-                "200",
+                "-p",
+                ports,
                 "--host-timeout",
                 f"{max(10, timeout_s)}s",
                 "-oG",
