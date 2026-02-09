@@ -12,9 +12,11 @@ function nowIso() {
 }
 
 function buildPayload(record) {
+  const ts = record.ts || record.timestamp || nowIso();
   return {
     ...record,
-    timestamp: record.timestamp || nowIso()
+    ts,
+    timestamp: record.timestamp || ts
   };
 }
 
