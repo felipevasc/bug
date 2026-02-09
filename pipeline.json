@@ -1,0 +1,42 @@
+{
+  "name": "default",
+  "stages": [
+    {
+      "name": "recon",
+      "skills": [
+        "src/skills/nodejs/recon/01-passive-recon.js",
+        "src/skills/python/recon/01-dns-recon.py",
+        "src/skills/shell/recon/01-subdomains.sh"
+      ]
+    },
+    {
+      "name": "enum",
+      "skills": [
+        "src/skills/nodejs/enum/01-http-enum.js",
+        "src/skills/python/enum/01-port-scan.py",
+        "src/skills/shell/enum/01-dir-enum.sh"
+      ]
+    },
+    {
+      "name": "exploit",
+      "skills": [
+        "src/skills/nodejs/exploit/01-proof-of-concept.js",
+        "src/skills/python/exploit/01-ssrf-check.py",
+        "src/skills/shell/exploit/01-sqli-test.sh"
+      ]
+    },
+    {
+      "name": "report",
+      "skills": [
+        "src/skills/nodejs/report/01-faraday-summary.js",
+        "src/skills/python/report/01-faraday-note.py",
+        "src/skills/shell/report/01-export.sh"
+      ]
+    }
+  ],
+  "options": {
+    "stop_on_error": false,
+    "allow_parallel": false,
+    "propagate_assets": true
+  }
+}
