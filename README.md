@@ -43,7 +43,9 @@ bash scripts/sanity.sh
 How-to para instalar dependencias (inclui Faraday opcional):
 
 ```bash
-bash scripts/sanity.sh --howto
+cat dependencies/README.md
+bash dependencies/install_kali.sh
+bash dependencies/check_kali.sh
 ```
 
 Rodar pipeline em dry-run (gera JSONL no stdout):
