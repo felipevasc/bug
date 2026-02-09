@@ -147,11 +147,11 @@ try:
       interesting.append((st_i, url, ln if ln is not None else ""))
   # Stable output order: status then URL
   interesting.sort(key=lambda x: (x[0], x[1]))
-  tsv.write_text("\n".join([f\"{st}\\t{url}\\t{ln}\" for st,url,ln in interesting]) + (\"\\n\" if interesting else \"\"), encoding=\"utf-8\", errors=\"ignore\")
-  txt.write_text(\"\\n\".join([f\"{st} {url}\" for st,url,_ in interesting]) + (\"\\n\" if interesting else \"\"), encoding=\"utf-8\", errors=\"ignore\")
+  tsv.write_text("\n".join([f"{st}\t{url}\t{ln}" for st, url, ln in interesting]) + ("\n" if interesting else ""), encoding="utf-8", errors="ignore")
+  txt.write_text("\n".join([f"{st} {url}" for st, url, _ in interesting]) + ("\n" if interesting else ""), encoding="utf-8", errors="ignore")
 except Exception:
-  tsv.write_text(\"\", encoding=\"utf-8\", errors=\"ignore\")
-  txt.write_text(\"\", encoding=\"utf-8\", errors=\"ignore\")
+  tsv.write_text("", encoding="utf-8", errors="ignore")
+  txt.write_text("", encoding="utf-8", errors="ignore")
 PY
 
     while IFS=$'\t' read -r status url length; do
