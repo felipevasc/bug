@@ -91,6 +91,7 @@ async function main() {
     }
 
     const raw = parsed.value || {};
+    if (raw && raw.ts && !raw.timestamp) raw.timestamp = raw.ts;
     const record = buildPayload({
       ...raw,
       workspace: raw.workspace || args.workspace,
