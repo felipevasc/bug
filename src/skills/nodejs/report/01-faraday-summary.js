@@ -75,6 +75,48 @@ async function run({ target, emit, outDir, runTs }) {
   lines.push('|---|---:|');
   ['crit', 'high', 'med', 'low', 'info'].forEach((s) => lines.push(`| ${s} | ${sevCounts.get(s) || 0} |`));
   lines.push('');
+
+  // Triage
+  const findingsByTool = countBy(findings, (r) => r.tool || 'na');
+  const secHdrFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'security-headers');
+  const missingHdrCounts = countBy(secHdrFindings, (r) => (r.data && r.data.missing) ? String(r.data.missing) : 'unknown');
+  const findingsByTarget = countBy(findings, (r) => r.target || 'na');
+
+  lines.push('## Triage');
+  lines.push('');
+
+  lines.push('### Findings by tool');
+  lines.push('');
+  lines.push('| Tool | Count |');
+  lines.push('|---|---:|');
+  Array.from(findingsByTool.entries())
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+    .forEach(([k, v]) => lines.push(`| ${mdEscape(k)} | ${v} |`));
+  lines.push('');
+
+  lines.push('### Missing security headers (by header)');
+  lines.push('');
+  if (secHdrFindings.length === 0) {
+    lines.push('_None._');
+  } else {
+    lines.push('| Header | Count |');
+    lines.push('|---|---:|');
+    Array.from(missingHdrCounts.entries())
+      .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+      .forEach(([k, v]) => lines.push(`| ${mdEscape(k)} | ${v} |`));
+  }
+  lines.push('');
+
+  lines.push('### Top 10 targets by finding count');
+  lines.push('');
+  lines.push('| Target | Findings |');
+  lines.push('|---|---:|');
+  Array.from(findingsByTarget.entries())
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+    .slice(0, 10)
+    .forEach(([k, v]) => lines.push(`| \`${mdEscape(k)}\` | ${v} |`));
+  lines.push('');
+
   lines.push('## Findings');
   lines.push('');
   lines.push('| Severity | Tool | Stage | Target | What | Evidence |');
@@ -145,7 +187,6 @@ async function run({ target, emit, outDir, runTs }) {
     });
   }
 
-  const secHdrFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'security-headers');
   if (secHdrFindings.length) {
     lines.push(`- Missing security headers findings: ${secHdrFindings.length}`);
     const top = secHdrFindings.slice(0, 12);
