@@ -23,70 +23,132 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-function mdToHtml(md) {
-  // Minimal markdown rendering (headings, lists, code fences, tables-as-pre).
-  // This avoids adding npm deps; formatting is decent enough for PDF.
-  const lines = String(md || '').split('\n');
+function readJsonl(p) {
+  if (!fs.existsSync(p)) return [];
   const out = [];
-  let inCode = false;
-  let inList = false;
+  const txt = fs.readFileSync(p, 'utf8');
+  txt.split('\n').forEach((l) => {
+    const line = l.trim();
+    if (!line) return;
+    try { out.push(JSON.parse(line)); } catch (_e) { /* ignore */ }
+  });
+  return out;
+}
 
-  const flushList = () => {
-    if (inList) {
-      out.push('</ul>');
-      inList = false;
-    }
+function sevRank(s) {
+  const m = { crit: 5, critical: 5, high: 4, med: 3, medium: 3, low: 2, info: 1 };
+  return m[String(s || '').toLowerCase()] || 0;
+}
+
+function badge(sev) {
+  const s = String(sev || 'info').toLowerCase();
+  return `<span class="badge badge-${s}">${escapeHtml(s)}</span>`;
+}
+
+function table(headers, rows) {
+  const th = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('');
+  const body = rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('');
+  return `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
+  const assets = records.filter((r) => r && r.type === 'asset');
+  const findings = records.filter((r) => r && r.type === 'finding');
+  const notes = records.filter((r) => r && r.type === 'note');
+
+  const counts = {
+    assets: assets.length,
+    findings: findings.length,
+    notes: notes.length,
+    total: records.length
   };
 
-  for (const raw of lines) {
-    const line = raw.replace(/\r$/, '');
+  const subdomainAssets = assets.filter((r) => r.tool === 'subdomains' && r.data && Array.isArray(r.data.hostnames));
+  const subdomains = Array.from(new Set(subdomainAssets.flatMap((a) => a.data.hostnames))).sort();
 
-    if (line.trim().startsWith('```')) {
-      flushList();
-      if (!inCode) {
-        inCode = true;
-        out.push('<pre><code>');
-      } else {
-        inCode = false;
-        out.push('</code></pre>');
-      }
-      continue;
-    }
+  const secHdr = findings.filter((r) => r.tool === 'security-headers');
+  const sslWeak = findings.filter((r) => r.tool === 'sslscan' && r.data && r.data.weak_protocols === true);
 
-    if (inCode) {
-      out.push(`${escapeHtml(line)}\n`);
-      continue;
-    }
-
-    const h1 = line.match(/^#\s+(.*)$/);
-    const h2 = line.match(/^##\s+(.*)$/);
-    const h3 = line.match(/^###\s+(.*)$/);
-    if (h1) { flushList(); out.push(`<h1>${escapeHtml(h1[1])}</h1>`); continue; }
-    if (h2) { flushList(); out.push(`<h2>${escapeHtml(h2[1])}</h2>`); continue; }
-    if (h3) { flushList(); out.push(`<h3>${escapeHtml(h3[1])}</h3>`); continue; }
-
-    const li = line.match(/^[-*]\s+(.*)$/);
-    if (li) {
-      if (!inList) { out.push('<ul>'); inList = true; }
-      out.push(`<li>${escapeHtml(li[1])}</li>`);
-      continue;
-    }
-
-    if (line.trim().length === 0) {
-      flushList();
-      out.push('<div class="spacer"></div>');
-      continue;
-    }
-
-    flushList();
-    // Simple inline code: `x`
-    const rendered = escapeHtml(line).replace(/`([^`]+)`/g, '<code>$1</code>');
-    out.push(`<p>${rendered}</p>`);
+  const byMissing = new Map();
+  for (const f of secHdr) {
+    const k = (f.data && f.data.missing) ? String(f.data.missing) : 'unknown';
+    byMissing.set(k, (byMissing.get(k) || 0) + 1);
   }
 
-  flushList();
-  if (inCode) out.push('</code></pre>');
-  return out.join('\n');
+  const topFindings = [...findings]
+    .sort((a, b) => sevRank(b.severity) - sevRank(a.severity))
+    .slice(0, 40)
+    .map((f) => {
+      const what = f.tool === 'security-headers'
+        ? `missing ${escapeHtml(f.data && f.data.missing)}`
+        : escapeHtml(f.data ? JSON.stringify(f.data).slice(0, 120) : '');
+      const ev = Array.isArray(f.evidence) && f.evidence.length ? escapeHtml(String(f.evidence[0])) : '';
+      return [badge(f.severity), `<code>${escapeHtml(f.tool)}</code>`, `<code>${escapeHtml(f.target)}</code>`, what, `<span class="muted">${ev}</span>`];
+    });
+
+  const secHdrRows = Array.from(byMissing.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([k, v]) => [`<code>${escapeHtml(k)}</code>`, `<b>${v}</b>`]);
+
+  const summaryCards = `
+  <div class="grid">
+    <div class="card"><div class="k">Target</div><div class="v">${escapeHtml(target)}</div></div>
+    <div class="card"><div class="k">Run</div><div class="v"><code>${escapeHtml(runTs)}</code></div></div>
+    <div class="card"><div class="k">Records</div><div class="v">${counts.total}</div><div class="s">assets ${counts.assets} · findings ${counts.findings} · notes ${counts.notes}</div></div>
+    <div class="card"><div class="k">Subdomains</div><div class="v">${subdomains.length}</div><div class="s">discovered in recon</div></div>
+    <div class="card"><div class="k">Missing sec headers</div><div class="v">${secHdr.length}</div><div class="s">HSTS/CSP/etc</div></div>
+    <div class="card"><div class="k">Weak TLS flags</div><div class="v">${sslWeak.length}</div><div class="s">sslscan heuristic</div></div>
+  </div>`;
+
+  const subdomainSample = subdomains.slice(0, 20).map((s) => `<code>${escapeHtml(s)}</code>`).join(' ');
+
+  return `
+  <div class="header">
+    <div>
+      <div class="title">Security Assessment Report</div>
+      <div class="subtitle">Generated by bugbounty-automation-hub · scope-limited · no exploit stage</div>
+    </div>
+    <div class="meta">Evidence root: <code>${escapeHtml(path.join(rootOut, 'evidence'))}</code></div>
+  </div>
+
+  ${summaryCards}
+
+  <h2>Executive summary</h2>
+  <p>This run focused on <b>discovery</b> + <b>enumeration</b> + <b>safe checks</b>. Findings below highlight configuration gaps and signals worth deeper follow-up.</p>
+
+  <h2>Top findings (prioritized)</h2>
+  ${table(['sev', 'tool', 'target', 'what', 'evidence'], topFindings)}
+
+  <h2>Security headers (missing)</h2>
+  <div class="two">
+    <div class="card">
+      <div class="k">Most frequent missing headers</div>
+      ${table(['header', 'count'], secHdrRows)}
+    </div>
+    <div class="card">
+      <div class="k">Notes</div>
+      <ul>
+        <li>"Missing" is based on <code>curl -I -L</code> response headers for sampled endpoints.</li>
+        <li>Some apps intentionally omit headers (e.g. legacy systems); confirm business context.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Assets</h2>
+  <div class="card">
+    <div class="k">Subdomains discovered</div>
+    <div class="s">Total: <b>${subdomains.length}</b> · sample:</div>
+    <div class="chips">${subdomainSample || '<span class="muted">(none)</span>'}</div>
+  </div>
+
+  <h2>Appendix</h2>
+  <div class="card">
+    <div class="k">Raw markdown report</div>
+    <div class="s">Source: <code>${escapeHtml(mdPath)}</code></div>
+    <pre><code>${escapeHtml(fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8').slice(0, 20000) : '')}</code></pre>
+  </div>
+  `;
 }
 
 function htmlTemplate({ title, bodyHtml }) {
@@ -96,18 +158,44 @@ function htmlTemplate({ title, bodyHtml }) {
   <meta charset="utf-8" />
   <title>${escapeHtml(title)}</title>
   <style>
-    @page { size: A4; margin: 18mm 16mm; }
-    body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; color: #111; }
-    h1 { font-size: 22px; margin: 0 0 10px; }
-    h2 { font-size: 16px; margin: 18px 0 8px; border-bottom: 1px solid #eee; padding-bottom: 4px; }
-    h3 { font-size: 13px; margin: 14px 0 6px; }
-    p, li { font-size: 11px; line-height: 1.35; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }
-    pre { background: #0b1020; color: #e6edf3; padding: 10px; border-radius: 8px; overflow-wrap: anywhere; }
+    @page { size: A4; margin: 16mm 14mm; }
+    body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; color: #0f172a; }
+
+    .header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:14px; }
+    .title { font-size: 20px; font-weight: 750; letter-spacing: -0.02em; }
+    .subtitle { font-size: 11px; color: #475569; margin-top: 2px; }
+    .meta { font-size: 10px; color: #64748b; text-align:right; max-width: 320px; }
+
+    h2 { font-size: 13px; margin: 16px 0 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+    p, li { font-size: 10.5px; line-height: 1.4; margin: 0 0 6px; }
+
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; background: #f1f5f9; padding: 1px 4px; border-radius: 4px; }
+    pre { background: #0b1020; color: #e6edf3; padding: 10px; border-radius: 10px; overflow-wrap: anywhere; white-space: pre-wrap; }
     pre code { background: transparent; color: inherit; padding: 0; }
-    ul { margin: 6px 0 6px 18px; }
-    .spacer { height: 6px; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 10px; }
+
+    .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0 16px; }
+    .two { display:grid; grid-template-columns: 1.1fr 0.9fr; gap: 10px; }
+
+    .card { border:1px solid #e2e8f0; border-radius: 12px; padding: 10px; background: #ffffff; }
+    .k { font-size: 10px; color:#64748b; text-transform: uppercase; letter-spacing: .06em; }
+    .v { font-size: 16px; font-weight: 800; margin-top: 2px; }
+    .s { font-size: 10px; color:#475569; margin-top: 2px; }
+
+    table { width:100%; border-collapse: collapse; font-size: 10px; }
+    th { text-align:left; color:#64748b; font-weight: 700; border-bottom:1px solid #e2e8f0; padding: 6px 6px; }
+    td { border-bottom:1px solid #f1f5f9; padding: 6px 6px; vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+
+    .muted { color:#64748b; }
+    .chips { margin-top: 6px; }
+    .chips code { margin-right: 4px; display:inline-block; margin-bottom: 4px; }
+
+    .badge { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; }
+    .badge-info { background:#e0f2fe; color:#075985; }
+    .badge-low { background:#ecfccb; color:#365314; }
+    .badge-med { background:#ffedd5; color:#9a3412; }
+    .badge-high { background:#fee2e2; color:#991b1b; }
+    .badge-crit { background:#0f172a; color:#fff; }
   </style>
 </head>
 <body>
@@ -133,14 +221,16 @@ async function run({ target, emit, outDir, runTs }) {
     return;
   }
 
-  const md = fs.readFileSync(mdPath, 'utf8');
-  const body = mdToHtml(md);
+  const recordsPath = path.join(rootOut, 'records.jsonl');
+  const records = readJsonl(recordsPath);
+
+  const body = buildPrettyBody({ target, runTs: reportTs, rootOut, records, mdPath });
   const html = htmlTemplate({ title: `Report: ${target}`, bodyHtml: body });
 
   const htmlPath = path.join(reportDir, 'report.html');
   fs.writeFileSync(htmlPath, html);
 
-  const evidence = [htmlPath, mdPath];
+  const evidence = [htmlPath, mdPath, recordsPath];
 
   const pdfPath = path.join(reportDir, 'report.pdf');
 
