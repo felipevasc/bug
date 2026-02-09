@@ -52,6 +52,11 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (key === '--max-targets' && val) {
+      args.maxTargets = val;
+      i += 1;
+      continue;
+    }
     if (key === '--allow-exploit') {
       args.allowExploit = true;
       continue;
@@ -283,7 +288,7 @@ async function main() {
   const pipelinePath = args.pipeline || 'pipeline.json';
 
   if (args.targets.length === 0) {
-    process.stderr.write('Usage: run-pipeline --target <t> [--target <t2>] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec] [--allow-exploit] [--confirm str] [--dry-run] [--strict]\n');
+    process.stderr.write('Usage: run-pipeline --target <t> [--target <t2>] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec] [--max-targets n] [--allow-exploit] [--confirm str] [--dry-run] [--strict]\n');
     process.exit(1);
   }
 
@@ -318,6 +323,7 @@ async function main() {
   }
 
   const propagateAssets = Boolean(pipeline.options && pipeline.options.propagate_assets);
+  const maxTargets = Number(args.maxTargets || process.env.MAX_TARGETS || 0);
   const scope = loadScopeFile(args.scopeFile).entries;
   function inScopeOrAllowAll(t) {
     if (!args.scopeFile) return true;
@@ -392,6 +398,11 @@ async function main() {
         if (inScopeOrAllowAll(t)) next.add(t);
       });
       stageTargets = Array.from(next);
+
+      if (maxTargets > 0 && stageTargets.length > maxTargets) {
+        process.stderr.write(`[runner] max-targets cap: ${stageTargets.length} -> ${maxTargets}\n`);
+        stageTargets = stageTargets.slice(0, maxTargets);
+      }
     }
   }
 
