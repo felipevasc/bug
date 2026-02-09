@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Repo-local fallback (used when install_kali.sh can't use sudo/apt).
+export PATH="$ROOT_DIR/.tools/bin:$ROOT_DIR/.tools/gopath/bin:$PATH"
+
 need=(nmap httpx whatweb sslscan curl jq dig)
 want=(ffuf nuclei amass subfinder assetfinder naabu)
 

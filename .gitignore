@@ -17,3 +17,6 @@ yarn-error.log*
 # Python
 __pycache__/
 *.pyc
+
+# Local tool cache (used only when install_kali can't use sudo/apt)
+.tools/
