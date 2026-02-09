@@ -1,0 +1,30 @@
+{
+  "name": "smoke",
+  "stages": [
+    {
+      "name": "recon",
+      "skills": [
+        "../src/skills/nodejs/recon/01-passive-recon.js",
+        "../src/skills/python/recon/01-dns-recon.py",
+        "../src/skills/shell/recon/01-subdomains.sh"
+      ]
+    },
+    {
+      "name": "enum",
+      "skills": [
+        "../src/skills/nodejs/enum/01-http-enum.js"
+      ]
+    },
+    {
+      "name": "report",
+      "skills": [
+        "../src/skills/nodejs/report/01-faraday-summary.js"
+      ]
+    }
+  ],
+  "options": {
+    "stop_on_error": false,
+    "allow_parallel": false,
+    "propagate_assets": false
+  }
+}
