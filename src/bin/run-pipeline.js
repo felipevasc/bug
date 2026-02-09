@@ -13,6 +13,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
+const { normalizeRecord } = require('../lib/schema');
 const { loadScopeFile, targetInScope } = require('../lib/scope');
 
 loadEnv();
@@ -139,13 +140,15 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
 
   let emitted = 0;
   function emitRecord(raw) {
-    // Prefer ts but keep timestamp for existing ingest/Faraday behavior.
-    if (raw && raw.ts && !raw.timestamp) raw.timestamp = raw.ts;
+    const normalized = normalizeRecord(raw, {
+      stage: opts.stage || 'unknown',
+      tool: opts.tool || opts.sourceFallback || skillPath,
+      target
+    });
     const record = buildPayload({
-      ...raw,
-      target: raw && raw.target ? raw.target : target,
-      source: raw && raw.source ? raw.source : (opts.sourceFallback || skillPath),
-      workspace: raw && raw.workspace ? raw.workspace : opts.workspace
+      ...normalized,
+      source: normalized.source || opts.sourceFallback || skillPath,
+      workspace: normalized.workspace || opts.workspace
     });
 
     emitted += 1;
@@ -233,12 +236,15 @@ async function runSkillOnce(skillPath, target, opts) {
         continue;
       }
 
-      if (parsed.value && parsed.value.ts && !parsed.value.timestamp) parsed.value.timestamp = parsed.value.ts;
+      const normalized = normalizeRecord(parsed.value, {
+        stage: opts.stage || 'unknown',
+        tool: opts.tool || opts.sourceFallback || skillPath,
+        target
+      });
       const record = buildPayload({
-        ...parsed.value,
-        target: parsed.value.target || target,
-        source: parsed.value.source || opts.sourceFallback || skillPath,
-        workspace: parsed.value.workspace || opts.workspace
+        ...normalized,
+        source: normalized.source || opts.sourceFallback || skillPath,
+        workspace: normalized.workspace || opts.workspace
       });
 
       emitted += 1;
@@ -260,12 +266,15 @@ async function runSkillOnce(skillPath, target, opts) {
   if (outBuf.trim().length > 0) {
     const parsed = safeJsonParse(outBuf.trim());
     if (parsed.ok) {
-      if (parsed.value && parsed.value.ts && !parsed.value.timestamp) parsed.value.timestamp = parsed.value.ts;
+      const normalized = normalizeRecord(parsed.value, {
+        stage: opts.stage || 'unknown',
+        tool: opts.tool || opts.sourceFallback || skillPath,
+        target
+      });
       const record = buildPayload({
-        ...parsed.value,
-        target: parsed.value.target || target,
-        source: parsed.value.source || opts.sourceFallback || skillPath,
-        workspace: parsed.value.workspace || opts.workspace
+        ...normalized,
+        source: normalized.source || opts.sourceFallback || skillPath,
+        workspace: normalized.workspace || opts.workspace
       });
       emitted += 1;
       process.stdout.write(`${JSON.stringify(record)}\n`);
@@ -375,6 +384,8 @@ async function main() {
           strict: args.strict,
           workspace: args.workspace,
           sourceFallback: skillRef,
+          stage: stage.name,
+          tool: path.basename(skillRef),
           onRecord,
           outDir,
           scopeFile: args.scopeFile,
