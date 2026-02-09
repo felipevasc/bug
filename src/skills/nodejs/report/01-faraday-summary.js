@@ -93,8 +93,36 @@ async function run({ target, emit, outDir, runTs }) {
   const curlFindings = records.filter((r) => r && r.tool === 'curl' && r.type === 'finding');
   const portNotes = records.filter((r) => r && r.tool === 'port-scan');
 
+  // Counts
+  const toolCounts = countBy(records, (r) => `${r.stage || 'na'}:${r.tool || 'na'}`);
+  const stageCounts = countBy(records, (r) => r.stage || 'na');
+
+  lines.push('## Counts');
+  lines.push('');
+  lines.push('- By stage:');
+  Array.from(stageCounts.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0]))).forEach(([k, v]) => {
+    lines.push(`  - ${mdEscape(k)}: ${v}`);
+  });
+  lines.push('');
+  lines.push('- By tool (stage:tool):');
+  Array.from(toolCounts.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0]))).slice(0, 80).forEach(([k, v]) => {
+    lines.push(`  - ${mdEscape(k)}: ${v}`);
+  });
+  lines.push('');
+
   lines.push('## Useful extracted summary');
   lines.push('');
+
+  const subdomainAssets = records.filter((r) => r && r.type === 'asset' && r.tool === 'subdomains');
+  const subdomainList = [];
+  subdomainAssets.forEach((a) => {
+    const hs = a.data && Array.isArray(a.data.hostnames) ? a.data.hostnames : [];
+    hs.forEach((h) => subdomainList.push(h));
+  });
+  const uniqSubs = Array.from(new Set(subdomainList));
+  if (uniqSubs.length) {
+    lines.push(`- Subdomains discovered: ${uniqSubs.length} (see evidence in recon/subdomains)`);
+  }
 
   if (dnsNotes.length || dnsAssets.length) {
     const aRecs = [];
@@ -110,10 +138,28 @@ async function run({ target, emit, outDir, runTs }) {
   if (curlFindings.length) {
     lines.push('- HTTP checks (curl -I):');
     curlFindings.slice(0, 12).forEach((f) => {
-      const u = f.data && f.data.url ? f.data.url : '';
+      const u = f.data && (f.data.effective_url || f.data.url) ? (f.data.effective_url || f.data.url) : '';
       const sc = f.data && (f.data.status_code !== undefined) ? String(f.data.status_code) : '';
-      lines.push(`  - ${mdEscape(u)} → status ${mdEscape(sc)}`);
+      const red = f.data && (f.data.redirects !== undefined) ? String(f.data.redirects) : '';
+      lines.push(`  - ${mdEscape(u)} → status ${mdEscape(sc)} redirects ${mdEscape(red)}`);
     });
+  }
+
+  const secHdrFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'security-headers');
+  if (secHdrFindings.length) {
+    lines.push(`- Missing security headers findings: ${secHdrFindings.length}`);
+    const top = secHdrFindings.slice(0, 12);
+    top.forEach((f) => lines.push(`  - ${mdEscape((f.data && f.data.url) || '')}: missing ${mdEscape((f.data && f.data.missing) || '')}`));
+  }
+
+  const ffufFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'ffuf');
+  if (ffufFindings.length) {
+    lines.push(`- Dir enum (ffuf) interesting paths: ${ffufFindings.length}`);
+  }
+
+  const nucleiFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'nuclei');
+  if (nucleiFindings.length) {
+    lines.push(`- Nuclei findings: ${nucleiFindings.length}`);
   }
 
   if (portNotes.length) {

@@ -18,6 +18,12 @@
       ]
     },
     {
+      "name": "vuln",
+      "skills": [
+        "src/skills/shell/vuln/01-nuclei.sh"
+      ]
+    },
+    {
       "name": "exploit",
       "skills": [
         "src/skills/nodejs/exploit/01-proof-of-concept.js",

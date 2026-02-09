@@ -111,13 +111,53 @@ async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
     source: SOURCE
   });
 
+  function parseHeaders(txt) {
+    const headers = {};
+    String(txt || '').split('\n').forEach((line) => {
+      const l = line.trimEnd();
+      if (!l) return;
+      if (/^HTTP\//i.test(l)) return;
+      const i = l.indexOf(':');
+      if (i <= 0) return;
+      const k = l.slice(0, i).trim().toLowerCase();
+      const v = l.slice(i + 1).trim();
+      if (!k) return;
+      if (!headers[k]) headers[k] = [];
+      headers[k].push(v);
+    });
+    return headers;
+  }
+
+  function missingSecurityHeadersFindings(url, headers) {
+    const missing = [];
+    const has = (name) => Boolean(headers[name.toLowerCase()] && headers[name.toLowerCase()].length > 0);
+    const checks = [
+      ['strict-transport-security', 'Strict-Transport-Security', 'med'],
+      ['content-security-policy', 'Content-Security-Policy', 'med'],
+      ['x-frame-options', 'X-Frame-Options', 'low'],
+      ['x-content-type-options', 'X-Content-Type-Options', 'low'],
+      ['referrer-policy', 'Referrer-Policy', 'low'],
+      ['permissions-policy', 'Permissions-Policy', 'low']
+    ];
+    for (const [k, display, sev] of checks) {
+      if (!has(k)) missing.push({ header: display, severity: sev });
+    }
+    return missing;
+  }
+
   // Always do a light curl HEAD check (gives something useful even when tooling is sparse).
   for (const url of uniqueUrls.slice(0, 6)) {
     // eslint-disable-next-line no-await-in-loop
-    const res = await runCmdCapture('bash', ['-lc', `timeout ${maxSecs}s curl -k -sS -I -L --max-time ${maxSecs} ${JSON.stringify(url)} | head -n 20 || true`]);
+    const cmd = `timeout ${maxSecs}s curl -k -sS -I -L --max-time ${maxSecs} -D - -o /dev/null -w "\nCURL_EFFECTIVE_URL:%{url_effective}\nCURL_REDIRECTS:%{num_redirects}\n" ${JSON.stringify(url)} || true`;
+    const res = await runCmdCapture('bash', ['-lc', cmd]);
     const p = writeEvidence(evDir, `${target}.${Buffer.from(url).toString('base64url')}.curl-head.txt`, res.stdout || '');
-    const m = (res.stdout || '').match(/^HTTP\/[0-9.]+\s+(\d+)/m);
-    const code = m ? Number(m[1]) : null;
+
+    const statusMatch = (res.stdout || '').match(/^HTTP\/[0-9.]+\s+(\d+)/m);
+    const code = statusMatch ? Number(statusMatch[1]) : null;
+    const effectiveUrl = ((res.stdout || '').match(/^CURL_EFFECTIVE_URL:(.*)$/m) || [null, ''])[1].trim();
+    const redirects = Number((((res.stdout || '').match(/^CURL_REDIRECTS:(.*)$/m) || [null, '0'])[1]).trim() || '0');
+    const headers = parseHeaders(res.stdout || '');
+
     emitJsonl(emit, {
       type: 'finding',
       tool: 'curl',
@@ -125,9 +165,32 @@ async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
       target,
       severity: code && code >= 400 ? 'low' : 'info',
       evidence: [p],
-      data: { url, status_code: code },
+      data: {
+        url,
+        effective_url: effectiveUrl || undefined,
+        redirects,
+        status_code: code,
+        server: headers.server ? headers.server[0] : undefined
+      },
       source: SOURCE
     });
+
+    // Emit findings for missing security headers (only for HTTPS endpoints).
+    if (String(effectiveUrl || url).startsWith('https://')) {
+      const missing = missingSecurityHeadersFindings(effectiveUrl || url, headers);
+      for (const m of missing) {
+        emitJsonl(emit, {
+          type: 'finding',
+          tool: 'security-headers',
+          stage: STAGE,
+          target,
+          severity: m.severity,
+          evidence: [p],
+          data: { url: effectiveUrl || url, missing: m.header },
+          source: SOURCE
+        });
+      }
+    }
   }
 
   for (const url of uniqueUrls.slice(0, 20)) {
