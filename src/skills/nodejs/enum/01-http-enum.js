@@ -215,7 +215,8 @@ async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
   const httpsUrl = uniqueUrls.find((u) => u.startsWith('https://'));
   if (httpsUrl && which('sslscan')) {
     const host = httpsUrl.replace(/^https:\/\//, '').split('/')[0];
-    const res = await runCmdCapture('bash', ['-lc', `timeout ${Math.max(maxSecs, 30)}s sslscan --no-colour ${JSON.stringify(host)} 2>/dev/null || true`]);
+    // Honor the overall --timeout so the skill finishes within the requested budget.
+    const res = await runCmdCapture('bash', ['-lc', `timeout ${maxSecs}s sslscan --no-colour ${JSON.stringify(host)} 2>/dev/null || true`]);
     const p = writeEvidence(evDir, `${target}.sslscan.txt`, res.stdout || '');
     const weak = /SSLv2|SSLv3|TLSv1\.0|TLSv1\.1/i.test(res.stdout || '');
     emitJsonl(emit, {
