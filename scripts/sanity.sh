@@ -118,36 +118,19 @@ fi
 rm -f "$tmp_out"
 
 echo "[sanity] pipeline dry-run JSONL parse"
+# Write JSONL to a temp file and validate with the repo validator.
+tmp_jsonl="$(mktemp)"
 if command -v timeout >/dev/null 2>&1; then
-  out="$(timeout 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null || true)"
+  timeout 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null >"$tmp_jsonl" || true
 else
-  out="$(node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null || true)"
+  node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null >"$tmp_jsonl" || true
 fi
-if [[ -z "$out" ]]; then
+if [[ ! -s "$tmp_jsonl" ]]; then
+  rm -f "$tmp_jsonl"
   fail "pipeline produced no stdout records"
 fi
-echo "$out" | python3 - <<'PY'
-import json,sys
-bad=0
-for i,line in enumerate(sys.stdin.read().splitlines(),1):
-  line=line.strip()
-  if not line: continue
-  try:
-    o=json.loads(line)
-  except Exception:
-    bad+=1
-    continue
-  # minimal required fields
-  for k in ("type","tool","stage","target","ts","timestamp","severity","evidence","source","data"):
-    if k not in o:
-      bad+=1
-      break
-  if "evidence" in o and not isinstance(o["evidence"], list):
-    bad+=1
-if bad:
-  raise SystemExit(1)
-PY
-[[ "$?" == "0" ]] || fail "invalid jsonl records from pipeline"
+node scripts/validate-jsonl.js --file "$tmp_jsonl" >/dev/null
+rm -f "$tmp_jsonl"
 
 echo "[sanity] OK"
 echo "[sanity] Tip: para instalar dependencias/Faraday, rode: bash scripts/sanity.sh --howto" >&2
