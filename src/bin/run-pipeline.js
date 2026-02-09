@@ -62,6 +62,10 @@ function parseArgs(argv) {
       args.allowExploit = true;
       continue;
     }
+    if (key === '--allow-vuln') {
+      args.allowVuln = true;
+      continue;
+    }
     if (key === '--confirm' && val) {
       args.confirm = val;
       i += 1;
@@ -346,7 +350,7 @@ async function main() {
   }
 
   for (const stage of selectedStages) {
-    if (stage && (stage.name === 'exploit' || stage.name === 'vuln')) {
+    if (stage && stage.name === 'exploit') {
       const okGate = Boolean(args.allowExploit) && String(args.confirm || '') === 'arrocha!';
       if (!okGate) {
         const record = buildPayload({
@@ -363,7 +367,29 @@ async function main() {
         process.stdout.write(`${JSON.stringify(record)}\n`);
         recordsStream.write(`${JSON.stringify(record)}\n`);
         if (!args.dryRun) void ingestRecord(record);
-        process.stderr.write(`[runner] ${stage.name} stage blocked (missing --allow-exploit and/or --confirm)\n`);
+        process.stderr.write('[runner] exploit stage blocked (missing --allow-exploit and/or --confirm)\n');
+        continue;
+      }
+    }
+
+    if (stage && stage.name === 'vuln') {
+      const okGate = Boolean(args.allowVuln);
+      if (!okGate) {
+        const record = buildPayload({
+          type: 'note',
+          tool: 'vuln-gate',
+          stage: stage.name,
+          target: stageTargets[0] || args.targets[0] || '',
+          severity: 'info',
+          evidence: [],
+          data: { blocked: true, required: '--allow-vuln' },
+          source: 'src/bin/run-pipeline.js',
+          workspace: args.workspace
+        });
+        process.stdout.write(`${JSON.stringify(record)}\n`);
+        recordsStream.write(`${JSON.stringify(record)}\n`);
+        if (!args.dryRun) void ingestRecord(record);
+        process.stderr.write('[runner] vuln stage blocked (missing --allow-vuln)\n');
         continue;
       }
     }
