@@ -289,9 +289,9 @@ if [[ -n "$SUDO" ]]; then
     nmap sslscan whatweb \
     python3 python3-venv python3-pip \
     coreutils \
-    wkhtmltopdf \
+    chromium \
     fonts-dejavu-core \
-    fonts-liberation # coreutils provides the `timeout` binary; wkhtmltopdf generates PDF reports
+    fonts-liberation # coreutils provides the `timeout` binary; chromium generates PDF reports (headless print-to-pdf)
 else
   echo "[deps] skipping apt base package install (no sudo available)" >&2
   command -v curl >/dev/null 2>&1 || { echo "[deps] ERROR: curl is required but missing." >&2; exit 1; }

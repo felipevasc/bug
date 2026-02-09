@@ -22,7 +22,7 @@ Esta pasta descreve e automatiza a instalacao das dependencias que o pipeline us
 - `nuclei` + `nuclei-templates`
 
 ### PDF Report (bonito)
-- `wkhtmltopdf` (converte `report.html` -> `report.pdf`)
+- `chromium` (headless `--print-to-pdf` a partir do `report.html`)
 
 ### Faraday (opcional)
 - `faraday` + `postgresql` + `redis-server`

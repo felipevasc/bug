@@ -5,7 +5,7 @@
  * @skill: nodejs/report/pdf-report
  * @inputs: target[, out-dir]
  * @outputs: note
- * @tools: wkhtmltopdf (optional)
+ * @tools: chromium or wkhtmltopdf (optional)
  */
 
 const fs = require('fs');
@@ -142,9 +142,27 @@ async function run({ target, emit, outDir, runTs }) {
 
   const evidence = [htmlPath, mdPath];
 
+  const pdfPath = path.join(reportDir, 'report.pdf');
+
+  // Preferred: chromium headless print-to-pdf.
+  if (which('chromium') || which('chromium-browser')) {
+    const bin = which('chromium') ? 'chromium' : 'chromium-browser';
+    const fileUrl = `file://${htmlPath}`;
+    await runCmdCapture('bash', ['-lc', `${bin} --headless --disable-gpu --no-sandbox --enable-local-file-access --print-to-pdf=${JSON.stringify(pdfPath)} ${JSON.stringify(fileUrl)} >/dev/null 2>&1 || true`]);
+    if (fs.existsSync(pdfPath) && fs.statSync(pdfPath).size > 0) {
+      evidence.unshift(pdfPath);
+      emitJsonl(emit, {
+        type: 'note', tool: 'pdf-report', stage: STAGE, target,
+        severity: 'info', evidence,
+        data: { pdf: pdfPath, html: htmlPath, md: mdPath, rootOut },
+        source: SOURCE
+      });
+      return;
+    }
+  }
+
+  // Fallback: wkhtmltopdf.
   if (which('wkhtmltopdf')) {
-    const pdfPath = path.join(reportDir, 'report.pdf');
-    // wkhtmltopdf wants local file access enabled for file://
     await runCmdCapture('bash', ['-lc', `wkhtmltopdf --enable-local-file-access ${JSON.stringify(htmlPath)} ${JSON.stringify(pdfPath)} >/dev/null 2>&1 || true`]);
     if (fs.existsSync(pdfPath) && fs.statSync(pdfPath).size > 0) {
       evidence.unshift(pdfPath);
@@ -156,20 +174,12 @@ async function run({ target, emit, outDir, runTs }) {
       });
       return;
     }
-
-    emitJsonl(emit, {
-      type: 'note', tool: 'pdf-report', stage: STAGE, target,
-      severity: 'info', evidence,
-      data: { skipped: true, reason: 'wkhtmltopdf failed or produced empty pdf', html: htmlPath },
-      source: SOURCE
-    });
-    return;
   }
 
   emitJsonl(emit, {
     type: 'note', tool: 'pdf-report', stage: STAGE, target,
     severity: 'info', evidence,
-    data: { skipped: true, reason: 'wkhtmltopdf not installed', html: htmlPath },
+    data: { skipped: true, reason: 'no pdf backend available (chromium/wkhtmltopdf missing or failed)', html: htmlPath },
     source: SOURCE
   });
 }
