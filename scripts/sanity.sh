@@ -103,11 +103,11 @@ fi
 
 echo "[sanity] pipeline dry-run count"
 tmp_out="$(mktemp)"
-node src/bin/run-pipeline.js --target example.com --dry-run --timeout 5 >/dev/null 2>"$tmp_out" || true
+node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 >/dev/null 2>"$tmp_out" || true
 rm -f "$tmp_out"
 
 echo "[sanity] pipeline dry-run JSONL parse"
-out="$(node src/bin/run-pipeline.js --target example.com --dry-run --timeout 5 2>/dev/null || true)"
+out="$(node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 2>/dev/null || true)"
 if [[ -z "$out" ]]; then
   fail "pipeline produced no stdout records"
 fi
@@ -123,7 +123,7 @@ for i,line in enumerate(sys.stdin.read().splitlines(),1):
     bad+=1
     continue
   # minimal required fields
-  for k in ("type","tool","stage","target","ts","timestamp","severity","evidence"):
+  for k in ("type","tool","stage","target","ts","timestamp","severity","evidence","source","data"):
     if k not in o:
       bad+=1
       break
