@@ -269,9 +269,9 @@ async function run({ target, emit, outDir, runTs }) {
     top.forEach((f) => lines.push(`  - ${mdEscape((f.data && f.data.url) || '')}: missing ${mdEscape((f.data && f.data.missing) || '')}`));
   }
 
-  const ffufFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'ffuf');
-  if (ffufFindings.length) {
-    lines.push(`- Dir enum (ffuf) interesting paths: ${ffufFindings.length}`);
+  const ffufFindings2 = records.filter((r) => r && r.type === 'finding' && r.tool === 'ffuf');
+  if (ffufFindings2.length) {
+    lines.push(`- Dir enum (ffuf) interesting paths: ${ffufFindings2.length}`);
   }
 
   const nucleiFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'nuclei');
