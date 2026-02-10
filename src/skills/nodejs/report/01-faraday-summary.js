@@ -6,6 +6,11 @@
  * @inputs: target[, out-dir, scope-file]
  * @outputs: note
  * @tools: local-files
+ *
+ * Goal: produce a professional, reader-friendly report (not a log dump).
+ * - Avoid leaking internal file paths in the body.
+ * - Group by meaning (potential vulns vs hardening vs attack surface).
+ * - Keep raw details minimal; prefer concise summaries.
  */
 
 const fs = require('fs');
@@ -28,7 +33,14 @@ function readJsonl(p) {
 }
 
 function mdEscape(s) {
-  return String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  return String(s || '')
+    .replace(/\|/g, '\\|')
+    .replace(/\r/g, ' ')
+    .replace(/\n/g, ' ');
+}
+
+function uniq(arr) {
+  return Array.from(new Set((arr || []).filter(Boolean)));
 }
 
 function countBy(arr, keyFn) {
@@ -41,8 +53,50 @@ function countBy(arr, keyFn) {
 }
 
 function severityRank(s) {
-  const m = { crit: 5, high: 4, med: 3, low: 2, info: 1 };
+  const m = { crit: 5, high: 4, med: 3, medium: 3, low: 2, info: 1, informational: 1 };
   return m[String(s || '').toLowerCase()] || 0;
+}
+
+function toSev(s) {
+  const v = String(s || '').toLowerCase();
+  if (v === 'critical') return 'crit';
+  if (v === 'high') return 'high';
+  if (v === 'medium') return 'med';
+  if (v === 'low') return 'low';
+  if (v === 'info' || v === 'informational') return 'info';
+  if (['crit', 'high', 'med', 'low', 'info'].includes(v)) return v;
+  return 'info';
+}
+
+function getUrlFromFinding(f) {
+  if (!f || !f.data) return '';
+  return String(f.data.url || f.data.effective_url || '');
+}
+
+function parseHost(u) {
+  try {
+    // eslint-disable-next-line no-new
+    const x = new URL(u);
+    return String(x.hostname || '').toLowerCase();
+  } catch (_e) {
+    return '';
+  }
+}
+
+function isProbablyNoiseFfufUrl(u) {
+  const s = String(u || '');
+  if (!s) return true;
+  // We saw ffuf results like "https://ufu.br/# admin" due to wordlist/comment artifacts.
+  if (s.includes('/# ')) return true;
+  if (s.includes('Curated paths/filenames')) return true;
+  if (s.includes('One token per line')) return true;
+  if (s.includes('Example:')) return true;
+  return false;
+}
+
+function capList(arr, n) {
+  const a = (arr || []).slice(0, n);
+  return { list: a, more: (arr || []).length - a.length };
 }
 
 async function run({ target, emit, outDir, runTs }) {
@@ -50,16 +104,17 @@ async function run({ target, emit, outDir, runTs }) {
   const recordsPath = path.join(rootOut, 'records.jsonl');
   const records = readJsonl(recordsPath);
 
-  const reportTs = process.env.RUN_TS || runTs || 'run';
+  const reportTs = process.env.REPORT_TS || process.env.RUN_TS || runTs || 'run';
   const reportDir = path.resolve('data', 'reports', reportTs);
   ensureDir(reportDir);
   const reportPath = path.join(reportDir, 'report.md');
 
+  // Classify records
   let findings = records.filter((r) => r && r.type === 'finding');
   const assets = records.filter((r) => r && r.type === 'asset');
   const notes = records.filter((r) => r && r.type === 'note');
 
-  // De-duplicate findings to avoid repeated noisy entries.
+  // De-duplicate findings (many tools repeat identical checks for http/https redirects)
   const seen = new Set();
   findings = findings.filter((f) => {
     const key = [f.tool || '', f.stage || '', f.target || '', JSON.stringify(f.data || {})].join('|');
@@ -68,19 +123,80 @@ async function run({ target, emit, outDir, runTs }) {
     return true;
   });
 
+  findings.forEach((f) => { f.severity = toSev(f.severity); });
   findings.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
 
   const sevCounts = countBy(findings, (r) => r.severity || 'info');
 
+  // Extract attack surface snapshot
+  const subdomainAssets = assets.filter((r) => r && r.tool === 'subdomains' && r.data && Array.isArray(r.data.hostnames));
+  const hostnames = uniq(subdomainAssets.flatMap((a) => (a.data && a.data.hostnames) ? a.data.hostnames : []));
+
+  const dnsAssets = assets.filter((r) => r && r.tool === 'dns' && r.data && Array.isArray(r.data.all_a));
+  const ips = uniq(dnsAssets.flatMap((a) => (a.data && a.data.all_a) ? a.data.all_a : []));
+
+  const openPorts = {};
+  findings
+    .filter((f) => f.tool === 'port-scan' && f.data && Array.isArray(f.data.open_ports))
+    .forEach((f) => { openPorts[f.target] = f.data.open_ports; });
+
+  // Tech fingerprint (whatweb)
+  const whatweb = findings.filter((f) => f.tool === 'whatweb' && f.data && f.data.fingerprint);
+  const drupal = [];
+  const servers = [];
+  whatweb.forEach((f) => {
+    const fp = String(f.data.fingerprint || '');
+    const m = fp.match(/Drupal\s+([0-9]+(?:\.[0-9]+)*)/i);
+    if (m && m[1]) drupal.push(m[1]);
+    const m2 = fp.match(/Apache\/([0-9]+(?:\.[0-9]+){1,3})/i);
+    if (m2 && m2[1]) servers.push(`Apache/${m2[1]}`);
+  });
+
+  // Hardening issues
+  const hdrFindings = findings.filter((f) => f.tool === 'security-headers' && f.data && f.data.url && f.data.missing);
+  const hdrByHost = new Map();
+  hdrFindings.forEach((f) => {
+    const url = String(f.data.url || '');
+    const host = parseHost(url) || String(f.target || '');
+    const missing = String(f.data.missing || '');
+    if (!host || !missing) return;
+    if (!hdrByHost.has(host)) hdrByHost.set(host, new Set());
+    hdrByHost.get(host).add(missing);
+  });
+
+  const tlsWeak = findings.filter((f) => f.tool === 'sslscan' && f.data && f.data.weak_protocols);
+
+  // Potential vulnerabilities: for now, treat nuclei results and other non-hardening signals as "potential".
+  const potentialVuln = findings.filter((f) => {
+    if (f.tool === 'nuclei') return true;
+    // keep room for future tools
+    return false;
+  });
+
+  // Discovery: ffuf
+  const ffuf = findings
+    .filter((f) => f.tool === 'ffuf' && f.data && (f.data.url || f.target))
+    .map((f) => ({
+      url: String(f.data.url || f.target || ''),
+      status: f.data && f.data.status !== undefined ? String(f.data.status) : '',
+      len: f.data && f.data.length !== undefined ? String(f.data.length) : ''
+    }))
+    .filter((x) => x.url && !isProbablyNoiseFfufUrl(x.url));
+
+  // Notes: timeouts / missing tools
+  const timeouts = notes.filter((n) => n.tool === 'runner-timeout');
+  const skippedTools = notes
+    .filter((n) => n && n.data && (n.data.skipped === true || /tool not found/i.test(String((n.data && (n.data.message || n.data.reason)) || ''))))
+    .slice(0, 30);
+
+  // --- Build markdown ---
   const lines = [];
-  lines.push(`# Report: ${mdEscape(target)}`);
+  lines.push(`# Security Scan Report — ${mdEscape(target)}`);
   lines.push('');
-  lines.push(`- Run: \`${mdEscape(reportTs)}\``);
-  lines.push(`- Target: \`${mdEscape(target)}\``);
-  lines.push(`- Records: ${records.length} (assets=${assets.length}, findings=${findings.length}, notes=${notes.length})`);
+  lines.push(`**Run ID:** \`${mdEscape(reportTs)}\``);
   lines.push('');
 
-  // --- Executive summary ---
+  // Executive summary (keep it short and decision-oriented)
   const critN = sevCounts.get('crit') || 0;
   const highN = sevCounts.get('high') || 0;
   const medN = sevCounts.get('med') || 0;
@@ -88,225 +204,109 @@ async function run({ target, emit, outDir, runTs }) {
 
   lines.push('## Executive summary');
   lines.push('');
-  if ((critN + highN + medN) === 0) {
-    lines.push('- No confirmed **high/critical** vulnerabilities were identified by this automated run.');
+  if (critN + highN + medN === 0) {
+    lines.push('- No **high/critical** vulnerabilities were identified by the automated checks in this run.');
   } else {
-    lines.push(`- Action required: **${critN} critical**, **${highN} high**, **${medN} medium** potential vulnerabilities identified.`);
+    lines.push(`- **Action required:** ${critN} critical, ${highN} high, ${medN} medium item(s) detected.`);
   }
-  if (lowN > 0) {
-    lines.push(`- **${lowN} low** severity issues were identified (mostly hardening/misconfig hygiene).`);
-  }
-  lines.push('- This report is based on automated recon/enum checks; exploitation is **not performed** unless explicitly allowed.');
+  if (lowN > 0) lines.push(`- ${lowN} low-severity items were identified (mostly hardening / configuration hygiene).`);
+  lines.push('- This report focuses on **actionable security insights** (not raw tool logs).');
   lines.push('');
 
-  // --- Summary table ---
-  lines.push('## Summary');
+  lines.push('## Findings summary');
   lines.push('');
   lines.push('| Severity | Count |');
   lines.push('|---|---:|');
   ['crit', 'high', 'med', 'low', 'info'].forEach((s) => lines.push(`| ${s} | ${sevCounts.get(s) || 0} |`));
   lines.push('');
 
-  // --- What was tested / limitations ---
-  lines.push('## Scope & methodology');
+  lines.push('## Attack surface snapshot');
   lines.push('');
-  lines.push('- Inputs: URLs discovered via `httpx` + `curl` and related pipeline artifacts.');
-  lines.push('- Rate limiting: `--rate` propagated to tools when supported.');
-  lines.push('- Nuclei: runs templates by **tags** or a project allowlist (if configured), with separate *run budget* vs *per-request timeout*.' );
-  lines.push('- Limitations: missing tools are skipped; timeouts may cause partial coverage.');
-  lines.push('');
-
-  // --- Classification (more intuitive) ---
-  const isHardening = (f) => f.tool === 'security-headers';
-  const isInformational = (f) => ['curl', 'whatweb', 'port-scan'].includes(String(f.tool || ''));
-  const isDiscovery = (f) => f.tool === 'ffuf';
-  const isPotentialVuln = (f) => !isHardening(f) && !isInformational(f) && !isDiscovery(f);
-
-  const potVuln = findings.filter(isPotentialVuln);
-  const hardening = findings.filter(isHardening);
-  const discovery = findings.filter(isDiscovery);
-  const info = findings.filter((f) => !isPotentialVuln(f) && !isHardening(f) && !isDiscovery(f));
-
-  lines.push('## Key items (triage)');
-  lines.push('');
-  if (potVuln.length === 0) {
-    lines.push('- Potential vulnerabilities: **none identified** by automated checks in this run.');
+  if (hostnames.length) {
+    const capped = capList(hostnames, 25);
+    lines.push(`- Subdomains discovered from site links: **${hostnames.length}**`);
+    lines.push(`  - Examples: ${capped.list.map((h) => `\`${mdEscape(h)}\``).join(', ')}${capped.more > 0 ? ` _(plus ${capped.more} more)_` : ''}`);
   } else {
-    lines.push(`- Potential vulnerabilities: **${potVuln.length}** item(s).`);
+    lines.push('- Subdomains: _(none discovered by link-crawl in this run)_');
   }
-  lines.push(`- Hardening recommendations: **${hardening.length}** item(s).`);
-  lines.push(`- Discovery / interesting paths: **${discovery.length}** item(s).`);
+  if (ips.length) lines.push(`- IPs observed: ${ips.map((ip) => `\`${mdEscape(ip)}\``).join(', ')}`);
+  if (Object.keys(openPorts).length) {
+    const top = Object.entries(openPorts).slice(0, 12);
+    lines.push('- Open ports (top):');
+    top.forEach(([h, ps]) => lines.push(`  - \`${mdEscape(h)}\`: ${Array.isArray(ps) ? ps.join(', ') : mdEscape(String(ps))}`));
+  }
+  if (drupal.length) lines.push(`- Detected CMS: Drupal ${uniq(drupal).map((v) => `\`${mdEscape(v)}\``).join(', ')}`);
+  if (servers.length) lines.push(`- Web server fingerprints observed: ${uniq(servers).slice(0, 6).map((v) => `\`${mdEscape(v)}\``).join(', ')}`);
   lines.push('');
 
-  // --- Hardening details (group missing headers per URL) ---
-  const secHdrFindings = findings.filter((r) => r && r.type === 'finding' && r.tool === 'security-headers');
-  const byUrl = new Map();
-  for (const f of secHdrFindings) {
-    const url = (f.data && f.data.url) ? String(f.data.url) : '';
-    const miss = (f.data && f.data.missing) ? String(f.data.missing) : '';
-    if (!url || !miss) continue;
-    if (!byUrl.has(url)) byUrl.set(url, new Set());
-    byUrl.get(url).add(miss);
-  }
-
-  lines.push('## Hardening recommendations');
-  lines.push('');
-  if (byUrl.size === 0) {
-    lines.push('_None._');
-  } else {
-    lines.push('### Missing HTTP security headers');
-    lines.push('');
-    for (const [url, set] of Array.from(byUrl.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
-      const missing = Array.from(set.values()).sort();
-      lines.push(`- ${mdEscape(url)}: missing **${missing.map((x) => mdEscape(x)).join(', ')}**`);
-    }
-  }
-  lines.push('');
-
-  // --- Discovery ---
-  lines.push('## Discovery / enumeration');
-  lines.push('');
-  const ffufFindings = findings.filter((r) => r && r.type === 'finding' && r.tool === 'ffuf');
-  if (ffufFindings.length === 0) {
-    lines.push('_None._');
-  } else {
-    // Only include a small, readable list.
-    ffufFindings.slice(0, 20).forEach((f) => {
-      const url = (f.data && f.data.url) ? String(f.data.url) : (f.target || '');
-      const status = (f.data && f.data.status !== undefined) ? String(f.data.status) : '';
-      lines.push(`- ffuf interesting path: ${mdEscape(url)}${status ? ` (status ${mdEscape(status)})` : ''}`);
-    });
-    if (ffufFindings.length > 20) lines.push(`- _(and ${ffufFindings.length - 20} more; see records.jsonl for details)_`);
-  }
-  lines.push('');
-
-  // --- Potential vulnerabilities (if any) ---
   lines.push('## Potential vulnerabilities');
   lines.push('');
-  if (potVuln.length === 0) {
-    lines.push('_None identified by automated templates in this run._');
+  if (potentialVuln.length === 0) {
+    lines.push('_No potential vulnerabilities were flagged by templates/tools in this run._');
   } else {
-    potVuln.forEach((f) => {
-      const ev = Array.isArray(f.evidence) ? f.evidence : [];
-      lines.push(`- **${mdEscape(f.severity)}** ${mdEscape(f.tool)} @ \`${mdEscape(f.target)}\`: ${mdEscape(f.data ? JSON.stringify(f.data) : '')}`);
-      if (ev.length) lines.push(`  - Evidence: ${ev.slice(0, 5).map((p) => `\`${mdEscape(p)}\``).join(', ')}`);
+    const capped = capList(potentialVuln, 20);
+    capped.list.forEach((f) => {
+      const u = getUrlFromFinding(f);
+      lines.push(`- **${mdEscape(f.severity)}** ${mdEscape(f.tool)} — ${u ? mdEscape(u) : `target ${mdEscape(f.target)}`}`);
     });
+    if (capped.more > 0) lines.push(`- _(plus ${capped.more} more)_`);
   }
   lines.push('');
 
-  // Keep the raw-ish table, but move it later and keep it compact.
-  lines.push('## Appendix: full findings (compact)');
-  lines.push('');
-  lines.push('| Severity | Tool | Stage | Target | What |');
-  lines.push('|---|---|---|---|---|');
-  for (const f of findings) {
-    const what = mdEscape(f.data ? JSON.stringify(f.data).slice(0, 160) : '');
-    lines.push(`| ${mdEscape(f.severity)} | ${mdEscape(f.tool)} | ${mdEscape(f.stage)} | \`${mdEscape(f.target)}\` | ${what} |`);
-  }
+  lines.push('## Hardening / configuration issues');
   lines.push('');
 
-  // Extract useful summary even when tooling is missing and there are no "findings".
-  const dnsNotes = records.filter((r) => r && r.tool === 'dns-recon');
-  const dnsAssets = records.filter((r) => r && r.tool === 'dns' && r.type === 'asset');
-  const curlFindings = records.filter((r) => r && r.tool === 'curl' && r.type === 'finding');
-  const portNotes = records.filter((r) => r && r.tool === 'port-scan');
+  if (hdrByHost.size === 0 && tlsWeak.length === 0) {
+    lines.push('_No hardening items captured by the current checks._');
+  } else {
+    if (hdrByHost.size) {
+      lines.push('### Missing HTTP security headers');
+      lines.push('');
+      Array.from(hdrByHost.entries())
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+        .forEach(([host, set]) => {
+          const missing = Array.from(set.values()).sort();
+          lines.push(`- \`${mdEscape(host)}\`: ${missing.map((x) => `**${mdEscape(x)}**`).join(', ')}`);
+        });
+      lines.push('');
+    }
 
-  // Counts
-  const toolCounts = countBy(records, (r) => `${r.stage || 'na'}:${r.tool || 'na'}`);
-  const stageCounts = countBy(records, (r) => r.stage || 'na');
-
-  lines.push('## Counts');
-  lines.push('');
-  lines.push('- By stage:');
-  Array.from(stageCounts.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0]))).forEach(([k, v]) => {
-    lines.push(`  - ${mdEscape(k)}: ${v}`);
-  });
-  lines.push('');
-  lines.push('- By tool (stage:tool):');
-  Array.from(toolCounts.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0]))).slice(0, 80).forEach(([k, v]) => {
-    lines.push(`  - ${mdEscape(k)}: ${v}`);
-  });
-  lines.push('');
-
-  lines.push('## Useful extracted summary');
-  lines.push('');
-
-  const subdomainAssets = records.filter((r) => r && r.type === 'asset' && r.tool === 'subdomains');
-  const subdomainList = [];
-  subdomainAssets.forEach((a) => {
-    const hs = a.data && Array.isArray(a.data.hostnames) ? a.data.hostnames : [];
-    hs.forEach((h) => subdomainList.push(h));
-  });
-  const uniqSubs = Array.from(new Set(subdomainList));
-  if (uniqSubs.length) {
-    lines.push(`- Subdomains discovered: ${uniqSubs.length} (see evidence in recon/subdomains)`);
+    if (tlsWeak.length) {
+      lines.push('### TLS / SSL observations');
+      lines.push('');
+      const hosts = uniq(tlsWeak.map((f) => f.target)).slice(0, 50);
+      lines.push(`- Weak/legacy TLS protocol support observed on: ${hosts.map((h) => `\`${mdEscape(h)}\``).join(', ')}`);
+      lines.push('');
+    }
   }
 
-  if (dnsNotes.length || dnsAssets.length) {
-    const aRecs = [];
-    dnsNotes.forEach((n) => {
-      const arr = n.data && Array.isArray(n.data.a_records) ? n.data.a_records : [];
-      arr.forEach((ip) => aRecs.push(ip));
+  lines.push('## Discovery highlights');
+  lines.push('');
+  if (ffuf.length === 0) {
+    lines.push('_No high-signal endpoints were extracted from directory enumeration in this run._');
+  } else {
+    const capped = capList(ffuf, 20);
+    capped.list.forEach((x) => {
+      lines.push(`- ${mdEscape(x.url)}${x.status ? ` (status ${mdEscape(x.status)})` : ''}`);
     });
-    dnsAssets.forEach((a) => { if (a && a.target) aRecs.push(a.target); });
-    const uniq = Array.from(new Set(aRecs)).slice(0, 50);
-    lines.push(`- DNS A records (${uniq.length}): ${uniq.map((x) => `\`${mdEscape(x)}\``).join(' ') || '(none)'}`);
-  }
-
-  if (curlFindings.length) {
-    lines.push('- HTTP checks (curl -I):');
-    curlFindings.slice(0, 12).forEach((f) => {
-      const u = f.data && (f.data.effective_url || f.data.url) ? (f.data.effective_url || f.data.url) : '';
-      const sc = f.data && (f.data.status_code !== undefined) ? String(f.data.status_code) : '';
-      const red = f.data && (f.data.redirects !== undefined) ? String(f.data.redirects) : '';
-      lines.push(`  - ${mdEscape(u)} → status ${mdEscape(sc)} redirects ${mdEscape(red)}`);
-    });
-  }
-
-  if (secHdrFindings.length) {
-    lines.push(`- Missing security headers findings: ${secHdrFindings.length}`);
-    const top = secHdrFindings.slice(0, 12);
-    top.forEach((f) => lines.push(`  - ${mdEscape((f.data && f.data.url) || '')}: missing ${mdEscape((f.data && f.data.missing) || '')}`));
-  }
-
-  const ffufFindings2 = records.filter((r) => r && r.type === 'finding' && r.tool === 'ffuf');
-  if (ffufFindings2.length) {
-    lines.push(`- Dir enum (ffuf) interesting paths: ${ffufFindings2.length}`);
-  }
-
-  const nucleiFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'nuclei');
-  if (nucleiFindings.length) {
-    lines.push(`- Nuclei findings: ${nucleiFindings.length}`);
-  }
-
-  if (portNotes.length) {
-    const n = portNotes[0];
-    const ev = Array.isArray(n.evidence) ? n.evidence : [];
-    const nmapTxt = ev.find((p) => String(p).endsWith('.nmap.txt'));
-    if (nmapTxt) lines.push(`- Nmap output: \`${mdEscape(nmapTxt)}\``);
-  }
-
-  lines.push('');
-  lines.push('## Assets');
-  lines.push('');
-  lines.push('| Tool | Stage | Target | Evidence |');
-  lines.push('|---|---|---|---|');
-  for (const a of assets.slice(0, 200)) {
-    const ev = Array.isArray(a.evidence) ? a.evidence : [];
-    const evStr = ev.slice(0, 3).map((p) => `\`${mdEscape(p)}\``).join('<br>');
-    lines.push(`| ${mdEscape(a.tool)} | ${mdEscape(a.stage)} | \`${mdEscape(a.target)}\` | ${evStr} |`);
+    if (capped.more > 0) lines.push(`- _(plus ${capped.more} more)_`);
   }
   lines.push('');
-  lines.push('## Notes');
+
+  lines.push('## Notes / limitations');
   lines.push('');
-  for (const n of notes.slice(0, 100)) {
-    lines.push(`- [${mdEscape(n.tool)}] ${mdEscape(n.data && (n.data.message || n.data.reason || n.data.summary) ? (n.data.message || n.data.reason || n.data.summary) : '')}`);
+  if (timeouts.length) lines.push(`- Timeouts occurred: **${timeouts.length}**`);
+  if (skippedTools.length) {
+    lines.push('- Some optional tools were missing/skipped in this environment; coverage may be partial.');
   }
+  lines.push('- Evidence and raw logs are available, but intentionally omitted from the main body to keep the report readable.');
   lines.push('');
-  lines.push('## Evidence');
+
+  // Minimal appendix for operators (no full paths)
+  lines.push('## Appendix (operator details)');
   lines.push('');
-  lines.push(`- Records JSONL: \`${mdEscape(recordsPath)}\``);
-  lines.push(`- Evidence root: \`${mdEscape(path.join(rootOut, 'evidence'))}\``);
+  lines.push(`- Records file: \`records.jsonl\` (run folder)`);
+  lines.push(`- Evidence folder: \`evidence/\` (run folder)`);
   lines.push('');
 
   fs.writeFileSync(reportPath, `${lines.join('\n')}\n`);
@@ -323,29 +323,25 @@ async function run({ target, emit, outDir, runTs }) {
   });
 }
 
-function defaultEmit(record) {
-  if (!record.ts) record.ts = new Date().toISOString();
-  if (!record.timestamp) record.timestamp = record.ts;
-  process.stdout.write(`${JSON.stringify(record)}\n`);
-}
-
 module.exports = { run };
 
 if (require.main === module) {
-  (async () => {
-    const args = parseCommonArgs(process.argv.slice(2));
-    if (!args.target) {
-      process.stderr.write('Usage: --target <host> [--out-dir dir]\n');
-      process.exit(1);
-    }
-    await run({
-      target: args.target,
-      emit: defaultEmit,
-      outDir: args.outDir,
-      runTs: process.env.RUN_TS || ''
-    });
-  })().catch((e) => {
-    process.stderr.write(`${e && e.stack ? e.stack : String(e)}\n`);
+  const args = parseCommonArgs(process.argv.slice(2));
+  const target = args.target || '';
+  if (!target) {
+    // eslint-disable-next-line no-console
+    console.error('Usage: 01-faraday-summary.js --target <host> [--out-dir dir]');
+    process.exit(1);
+  }
+  // Emit to stdout (JSONL)
+  run({
+    target,
+    outDir: args.outDir,
+    runTs: process.env.RUN_TS || '',
+    emit: (rec) => process.stdout.write(`${JSON.stringify(rec)}\n`)
+  }).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.error(e);
     process.exit(1);
   });
 }
