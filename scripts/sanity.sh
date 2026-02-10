@@ -73,6 +73,7 @@ echo "[sanity] node syntax checks"
 node --check scripts/new-skill.js
 node --check src/lib/faraday.js
 node --check src/lib/target.js
+node --check src/lib/targets.js
 node --check src/bin/run-pipeline.js
 node --check src/bin/faraday-ingest.js
 node --check src/bin/faraday-query.js

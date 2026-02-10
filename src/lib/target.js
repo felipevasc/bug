@@ -63,11 +63,9 @@ function normalizeUrl(raw, opts = {}) {
   if (!pathname.startsWith('/')) pathname = `/${pathname}`;
   const search = parsed.search || '';
 
-  let pathAndQuery = `${pathname}${search}`;
-  if (pathname === '/' && !search) pathAndQuery = '';
-
   const origin = `${scheme}://${host}${keepPort ? `:${keepPort}` : ''}`;
-  const url = `${origin}${pathAndQuery}`;
+  // Preserve path/query (but drop fragments) so URL targets remain web-first and unambiguous.
+  const url = `${origin}${pathname}${search}`;
 
   const out = {
     raw: rawStr,

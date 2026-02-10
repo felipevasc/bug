@@ -4,7 +4,7 @@
 const fs = require('fs');
 const net = require('net');
 const { URL } = require('url');
-const { normalizeTarget, normalizeHost } = require('./target');
+const { normalizeTarget, normalizeHost } = require('./targets');
 
 function normalizeLine(s) {
   return String(s || '').trim();
