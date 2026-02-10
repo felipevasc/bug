@@ -18,5 +18,4 @@ node "src/skills/nodejs/vuln/01-input-probe.js" \
   --out-dir "$OUT_DIR" \
   --allow-vuln \
   --rate "$RATE" \
-  --timeout "$TIMEOUT" \
-  "$@"
+  --timeout "$TIMEOUT"
