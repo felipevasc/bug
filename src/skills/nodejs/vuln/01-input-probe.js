@@ -20,6 +20,7 @@ const DEFAULT_MAX_CANDIDATES = 200;
 const DEFAULT_PAYLOADS_PER_PARAM = 30;
 const DEFAULT_RATE = 2;
 const DEFAULT_TIMEOUT = 15;
+const DEFAULT_MAX_REQUESTS = 1500;
 const ERROR_REGEX = /(error|exception|stack|fatal|undefined|warning|sqlstate|trace)/i;
 const PAYLOAD_CATEGORIES = ['xss', 'sqli', 'ssrf', 'cmdi', 'traversal'];
 const STATIC_EXTENSIONS = new Set(['.js', '.css', '.png', '.jpg', '.jpeg', '.svg', '.woff', '.woff2', '.ttf', '.otf', '.ico', '.map', '.gif', '.bmp', '.webp']);
@@ -537,12 +538,30 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
   const configuredRate = Number(rate || process.env.RATE || DEFAULT_RATE);
   const rateDelayMs = Math.max(0, Math.ceil(1000 / Math.max(configuredRate, 1)));
   const configuredTimeout = Number(timeout || process.env.TIMEOUT || DEFAULT_TIMEOUT);
+  const maxRequests = (() => {
+    const raw = Number(process.env.INPUT_PROBE_MAX_REQUESTS || DEFAULT_MAX_REQUESTS);
+    return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_REQUESTS;
+  })();
 
   const urls = gatherUrlsFromRecords(records);
   gatherInternalUrls(rootOut).forEach((url) => urls.add(url));
   const crawlBase = records.find((rec) => rec.tool === 'wget-crawl' && rec.data && rec.data.base_url);
   const crawlBaseUrl = crawlBase && crawlBase.data ? crawlBase.data.base_url : null;
-  const forms = gatherForms(rootOut, target, crawlBaseUrl);
+  // Prefer param-discovery asset (more reliable than scraping local crawl artifacts).
+  const paramAsset = records
+    .filter((rec) => rec && rec.type === 'asset' && rec.tool === 'param-discovery' && rec.stage === 'enum' && rec.data)
+    .slice(-1)[0];
+
+  const forms = paramAsset && Array.isArray(paramAsset.data.forms)
+    ? paramAsset.data.forms.map((f) => {
+        const inputsObj = {};
+        (f.inputs || []).forEach((inp) => {
+          if (inp && inp.name && inputsObj[inp.name] == null) inputsObj[inp.name] = inp.value || '1';
+        });
+        return { action: f.action, method: f.method, inputs: inputsObj };
+      })
+    : gatherForms(rootOut, target, crawlBaseUrl);
+
   let candidates = buildCandidates(urls, forms, maxCandidates);
   candidates = candidates.filter(isCandidateAllowed);
 
@@ -580,22 +599,28 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
 
   let anomalyCount = 0;
   let lastRequestTs = 0;
+  let requestCount = 0;
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const nextRequestReady = async () => {
-    if (!rateDelayMs) return;
-    const now = Date.now();
-    if (lastRequestTs && now < lastRequestTs + rateDelayMs) {
-      await wait(lastRequestTs + rateDelayMs - now);
+    if (requestCount >= maxRequests) return false;
+    if (rateDelayMs) {
+      const now = Date.now();
+      if (lastRequestTs && now < lastRequestTs + rateDelayMs) {
+        await wait(lastRequestTs + rateDelayMs - now);
+      }
+      lastRequestTs = Date.now();
     }
-    lastRequestTs = Date.now();
+    requestCount += 1;
+    return true;
   };
 
   const perParamLimit = Math.max(1, payloadsPerParam);
   for (const candidate of candidates) {
     const baselineResults = [];
     for (const benign of BENIGN_VALUES) {
-      await nextRequestReady();
+      const ok = await nextRequestReady();
+      if (!ok) break;
       const result = await sendRequest(configuredTimeout, candidate, benign);
       baselineResults.push(result);
     }
@@ -606,7 +631,8 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
 
     const limitedPayloads = payloadRegistry.slice(0, perParamLimit);
     for (const entry of limitedPayloads) {
-      await nextRequestReady();
+      const ok = await nextRequestReady();
+      if (!ok) break;
       const probeResult = await sendRequest(configuredTimeout, candidate, entry.payload);
       const anomalies = detectAnomalies(probeResult, baselineStats);
       if (!anomalies.length) continue;
@@ -676,7 +702,10 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
     data: {
       candidates: candidates.length,
       payloads_per_param: payloadRegistry.length ? Math.min(payloadRegistry.length, perParamLimit) : 0,
-      anomalies: anomalyCount
+      anomalies: anomalyCount,
+      requests: requestCount,
+      max_requests: maxRequests,
+      truncated: requestCount >= maxRequests
     },
     source: SOURCE
   });

@@ -262,6 +262,20 @@ async function run({ target, emit, outDir, runTs }) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
 
+  // Parameter & form discovery (from enum stage)
+  const paramDiscoveryAsset = records
+    .filter((r) => r && r.type === 'asset' && r.tool === 'param-discovery' && r.data)
+    .slice(-1)[0] || null;
+  const discoveredParams = paramDiscoveryAsset && Array.isArray(paramDiscoveryAsset.data.params)
+    ? paramDiscoveryAsset.data.params
+    : [];
+  const discoveredEndpoints = paramDiscoveryAsset && Array.isArray(paramDiscoveryAsset.data.endpoints)
+    ? paramDiscoveryAsset.data.endpoints
+    : [];
+  const discoveredForms = paramDiscoveryAsset && Array.isArray(paramDiscoveryAsset.data.forms)
+    ? paramDiscoveryAsset.data.forms
+    : [];
+
   // Notes: timeouts / missing tools
   const timeouts = notes.filter((n) => n.tool === 'runner-timeout');
   const skippedTools = notes
@@ -493,6 +507,28 @@ async function run({ target, emit, outDir, runTs }) {
       const exploitSignalText = entry.exploitSignal ? ' Exploit signal: yes.' : ' Exploit signal: no.';
       lines.push(`- **${mdEscape(entry.cveId)}** (CVSS ${mdEscape(scoreText)}, Impact ${mdEscape(impactLabel)}, Preconditions ${mdEscape(preconditionsText)}) — ${summaryText}${affectedText}${fixText}${techText}${exploitSignalText}`);
     });
+  }
+  lines.push('');
+
+  lines.push('## Parameter map (discovered inputs)');
+  lines.push('');
+  if (!paramDiscoveryAsset) {
+    lines.push('_Parameter discovery was not executed for this run._');
+  } else {
+    lines.push(`- URLs seen: ${mdEscape(String(paramDiscoveryAsset.data.urls_seen || 0))}; pages fetched: ${mdEscape(String(paramDiscoveryAsset.data.pages_fetched || 0))}; forms found: ${mdEscape(String(paramDiscoveryAsset.data.forms_found || 0))}.`);
+    if (discoveredParams.length) {
+      const topParams = discoveredParams.slice(0, 20).map((p) => `\`${mdEscape(p.name)}\` (${mdEscape(String(p.count))})`).join(', ');
+      lines.push(`- Top parameters: ${topParams}.`);
+    }
+    if (discoveredForms.length) {
+      const sampleForms = discoveredForms.slice(0, 6).map((f) => {
+        const names = (f.inputs || []).slice(0, 6).map((i) => i.name).filter(Boolean);
+        const method = f.method || 'GET';
+        return `  - ${mdEscape(method)} ${mdEscape(String(f.action || ''))} (inputs: ${mdEscape(names.join(', ') || 'n/a')}${(f.inputs || []).length > 6 ? ', …' : ''})`;
+      });
+      lines.push('- Sample forms:');
+      lines.push(...sampleForms);
+    }
   }
   lines.push('');
 
