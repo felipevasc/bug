@@ -94,17 +94,18 @@ def normalize_url(u: str):
   except Exception:
     return ("", "")
 
-host=""
-url=""
+host = target.lower().rstrip(".")
+url_from_target = ""
+if looks_like_url(target):
+  h2, url_from_target = normalize_url(target)
+  if h2:
+    host = h2
 
-url_candidate = raw_url or (target if looks_like_url(target) else "")
-if url_candidate:
-  host, url = normalize_url(url_candidate)
-
-if not host:
-  host = target.lower().rstrip(".")
-  if raw_url:
-    _h, url = normalize_url(raw_url)
+url = ""
+if raw_url:
+  _h, url = normalize_url(raw_url)
+elif url_from_target:
+  url = url_from_target
 
 print(f"{host}\\t{url}")
 PY
