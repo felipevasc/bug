@@ -245,6 +245,22 @@ async function run({ target, emit, outDir, runTs }) {
     }))
     .filter((x) => x.url && !isProbablyNoiseFfufUrl(x.url));
 
+  const inputProbeFindings = findings.filter((f) => f.tool === 'input-probe');
+  const inputProbeCategoryCounts = countBy(inputProbeFindings, (f) => {
+    const category = f && f.data && f.data.category ? String(f.data.category) : 'uncategorized';
+    return category;
+  });
+  const inputProbeParamCounts = countBy(inputProbeFindings, (f) => {
+    const param = f && f.data && f.data.param ? String(f.data.param) : '';
+    const url = f && f.data && f.data.url ? String(f.data.url) : f.target || '';
+    if (param && url) return `${param} @ ${url}`;
+    if (param) return param;
+    return url || 'unknown';
+  });
+  const topInputProbeParams = Array.from(inputProbeParamCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
   // Notes: timeouts / missing tools
   const timeouts = notes.filter((n) => n.tool === 'runner-timeout');
   const skippedTools = notes
@@ -420,6 +436,25 @@ async function run({ target, emit, outDir, runTs }) {
     }
   } else {
     lines.push('- Directory enumeration did not surface high-signal endpoints in this run.');
+  }
+  lines.push('');
+
+  lines.push('## Input probe anomalies');
+  lines.push('');
+  if (!inputProbeFindings.length) {
+    lines.push('_Input probing did not detect anomalies during this run or the stage was disabled._');
+  } else {
+    const categorySummary = Array.from(inputProbeCategoryCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat, count]) => `${count} ${mdEscape(cat)}`)
+      .join(', ');
+    lines.push(`- Input probe flagged ${inputProbeFindings.length} anomaly${inputProbeFindings.length === 1 ? '' : 'ies'}; counts by category: ${categorySummary}.`);
+    if (topInputProbeParams.length) {
+      const paramsList = topInputProbeParams
+        .map(([param, count]) => `\`${mdEscape(param)}\` (${count})`)
+        .join(', ');
+      lines.push(`- Top affected parameters: ${paramsList}.`);
+    }
   }
   lines.push('');
 

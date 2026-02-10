@@ -20,6 +20,12 @@
       ]
     },
     {
+      "name": "vuln",
+      "skills": [
+        "src/skills/nodejs/vuln/01-input-probe.js"
+      ]
+    },
+    {
       "name": "exploit",
       "skills": [
         "src/skills/nodejs/exploit/01-proof-of-concept.js",

