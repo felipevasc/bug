@@ -15,6 +15,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def now_iso():
@@ -82,6 +83,24 @@ def run_capture(cmd, timeout_s):
         return 124, "", "timeout"
 
 
+def split_target(raw: str):
+    s = (raw or "").strip()
+    if not s:
+        return "", ""
+    is_url = "://" in s or "/" in s or "?" in s or "#" in s or re.match(r"^[^/]+:\\d{1,5}$", s or "")
+    if not is_url:
+        return s.lower().rstrip("."), ""
+    u = s
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", u):
+        u = "https://" + u
+    try:
+        sp = urlsplit(u)
+        host = (sp.hostname or "").lower().rstrip(".")
+        return host, u
+    except Exception:
+        return s.lower().rstrip("."), ""
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
@@ -93,7 +112,7 @@ def main():
 
     source = "src/skills/python/recon/01-dns-recon.py"
     stage = "recon"
-    target = args.target
+    target, _target_url = split_target(args.target)
     scope_entries = load_scope(args.scope_file)
     if not target_in_scope(target, scope_entries):
         emit({

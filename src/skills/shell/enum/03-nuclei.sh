@@ -31,6 +31,46 @@ if [[ -z "$TARGET" ]]; then
   exit 1
 fi
 
+# Accept URL values in --target and normalize to a hostname.
+norm="$(
+  python3 - "$TARGET" <<'PY'
+import re,sys
+from urllib.parse import urlsplit
+
+s=(sys.argv[1] if len(sys.argv)>1 else "").strip()
+
+def has_scheme(x: str) -> bool:
+  return re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", x or "") is not None
+
+def looks_like_url(x: str) -> bool:
+  if not x:
+    return False
+  if has_scheme(x):
+    return True
+  if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+/\\d{1,2}$", x):
+    return False
+  if re.search(r"[/?#]", x):
+    return True
+  if re.match(r"^[^/]+:\\d{1,5}$", x):
+    return True
+  return False
+
+host=s
+if looks_like_url(s):
+  u=s if has_scheme(s) else "https://"+s
+  try:
+    sp=urlsplit(u)
+    host=(sp.hostname or s).lower().rstrip(".")
+  except Exception:
+    host=s.lower().rstrip(".")
+else:
+  host=s.lower().rstrip(".")
+
+print(host)
+PY
+)"
+if [[ -n "$norm" ]]; then TARGET="$norm"; fi
+
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TIMESTAMP="$TS"
 RUN_TS="${RUN_TS:-}"

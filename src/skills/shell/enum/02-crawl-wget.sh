@@ -44,6 +44,76 @@ if [[ -z "$TARGET" ]]; then
   exit 1
 fi
 
+# Accept URL values in --target and normalize to TARGET(host) + URL(optional).
+raw_url="$URL"
+if [[ -z "$raw_url" ]]; then raw_url="${TARGET_URL:-}"; fi
+norm="$(
+  python3 - "$TARGET" "$raw_url" <<'PY'
+import re,sys
+from urllib.parse import urlsplit, urlunsplit
+
+target=(sys.argv[1] if len(sys.argv)>1 else "").strip()
+raw_url=(sys.argv[2] if len(sys.argv)>2 else "").strip()
+
+def has_scheme(x: str) -> bool:
+  return re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", x or "") is not None
+
+def looks_like_url(x: str) -> bool:
+  if not x:
+    return False
+  if has_scheme(x):
+    return True
+  if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+/\\d{1,2}$", x):
+    return False
+  if re.search(r"[/?#]", x):
+    return True
+  if re.match(r"^[^/]+:\\d{1,5}$", x):
+    return True
+  return False
+
+def normalize_url(u: str):
+  s=(u or "").strip()
+  if not s:
+    return ("", "")
+  if not has_scheme(s):
+    s="https://"+s
+  try:
+    sp=urlsplit(s)
+    scheme=(sp.scheme or "https").lower()
+    host=(sp.hostname or "").lower().rstrip(".")
+    if not host:
+      return ("", "")
+    port=sp.port
+    keep_port = port and not ((scheme=="http" and port==80) or (scheme=="https" and port==443))
+    netloc = f"{host}:{port}" if keep_port else host
+    path = sp.path or "/"
+    if not path.startswith("/"):
+      path = "/" + path
+    sp = sp._replace(scheme=scheme, netloc=netloc, path=path, fragment="")
+    return (host, urlunsplit(sp))
+  except Exception:
+    return ("", "")
+
+host=""
+url=""
+
+url_candidate = raw_url or (target if looks_like_url(target) else "")
+if url_candidate:
+  host, url = normalize_url(url_candidate)
+
+if not host:
+  host = target.lower().rstrip(".")
+  if raw_url:
+    _h, url = normalize_url(raw_url)
+
+print(f"{host}\\t{url}")
+PY
+)"
+TARGET="${norm%%$'\t'*}"
+URL="${norm#*$'\t'}"
+export TARGET_HOST="$TARGET"
+export TARGET_URL="$URL"
+
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TIMESTAMP="$TS"
 RUN_TS="${RUN_TS:-}"
@@ -55,7 +125,6 @@ mkdir -p "$EV_DIR"
 
 TIMEOUT="${TIMEOUT:-60}"
 RATE="${RATE:-2}"
-if [[ -z "$URL" ]]; then URL="${TARGET_URL:-}"; fi
 
 emit_note() {
   local tool="$1"; shift
