@@ -229,30 +229,54 @@ REJECT="jpg,jpeg,png,gif,webp,mp4,mp3,avi,mov,pdf,zip,tar,gz,7z,exe,dmg,iso"
 # hard cap by quota + per-file size
 # --max-redirect defaults ok
 # --no-check-certificate because some targets have odd TLS; evidence still captured
+
+WGET_OK="1"
+if ! command -v wget >/dev/null 2>&1; then
+  WGET_OK="0"
+else
+  # Some minimal/busybox wget builds don't support the flags we rely on.
+  if ! wget --help 2>&1 | grep -q -- '--max-files'; then
+    WGET_OK="0"
+  fi
+fi
+
 set +e
-timeout "${TIMEOUT}s" wget \
-  --mirror \
-  --convert-links \
-  --adjust-extension \
-  --page-requisites \
-  --no-parent \
-  --domains "$TARGET" \
-  --execute robots=on \
-  --warc-file="$WARC_PREFIX" \
-  --warc-cdx \
-  --no-check-certificate \
-  --wait="$WAIT" --random-wait \
-  --limit-rate="${RATE}m" \
-  --max-files="$MAX_FILES" \
-  --max-redirect=5 \
-  --timeout=15 --tries=2 \
-  --quota="${QUOTA_MB}m" \
-  --accept="$ACCEPT" \
-  --reject="$REJECT" \
-  --max-filesize="${MAX_FILE_KB}k" \
-  --directory-prefix "$OUT_SUBDIR" \
-  "$BASE_URL" >"$LOG_FILE" 2>&1
-code=$?
+if [[ "$WGET_OK" == "1" ]]; then
+  timeout "${TIMEOUT}s" wget \
+    --mirror \
+    --convert-links \
+    --adjust-extension \
+    --page-requisites \
+    --no-parent \
+    --domains "$TARGET" \
+    --execute robots=on \
+    --warc-file="$WARC_PREFIX" \
+    --warc-cdx \
+    --no-check-certificate \
+    --wait="$WAIT" --random-wait \
+    --limit-rate="${RATE}m" \
+    --max-files="$MAX_FILES" \
+    --max-redirect=5 \
+    --timeout=15 --tries=2 \
+    --quota="${QUOTA_MB}m" \
+    --accept="$ACCEPT" \
+    --reject="$REJECT" \
+    --max-filesize="${MAX_FILE_KB}k" \
+    --directory-prefix "$OUT_SUBDIR" \
+    "$BASE_URL" >"$LOG_FILE" 2>&1
+  code=$?
+else
+  emit_note "wget" "info" "wget lacks required flags; using curl light crawl (home page only)"
+  PAGE_HTML="${OUT_SUBDIR}/page.html"
+  if command -v curl >/dev/null 2>&1; then
+    timeout "${TIMEOUT}s" curl -k -L --max-time 30 -A "Mozilla/5.0" "$BASE_URL" -o "$PAGE_HTML" >"$LOG_FILE" 2>&1
+    code=$?
+  else
+    echo "curl not found" >"$LOG_FILE"
+    : >"$PAGE_HTML"
+    code=127
+  fi
+fi
 set -e
 
 # Emit summary
@@ -458,22 +482,29 @@ external_count="$(wc -l <"$URLS_EXTERNAL" | tr -d ' ')"
 
 # Extract subdomains/hosts found in internal URLs and emit as an asset so the runner can propagate them.
 HOSTS_TXT="${OUT_SUBDIR}/hosts_internal.txt"
-python3 - "$TARGET" <"$URLS_INTERNAL" >"$HOSTS_TXT" <<'PY'
+python3 - "$TARGET" "$URLS_INTERNAL" >"$HOSTS_TXT" <<'PY'
 import sys
 from urllib.parse import urlsplit
 root = (sys.argv[1] or '').strip().lower().rstrip('.')
+path = sys.argv[2]
 hosts=set()
-for line in sys.stdin:
-  s=line.strip()
-  if not s: continue
-  try:
-    sp=urlsplit(s)
-  except Exception:
-    continue
-  h=(sp.hostname or '').lower().rstrip('.')
-  if not h: continue
-  if h==root or h.endswith('.'+root):
-    hosts.add(h)
+try:
+  fh = open(path, encoding='utf-8', errors='ignore')
+except Exception:
+  fh = None
+if fh:
+  for line in fh:
+    s=line.strip()
+    if not s: continue
+    try:
+      sp=urlsplit(s)
+    except Exception:
+      continue
+    h=(sp.hostname or '').lower().rstrip('.')
+    if not h: continue
+    if h==root or h.endswith('.'+root):
+      hosts.add(h)
+  fh.close()
 for h in sorted(hosts):
   print(h)
 PY
