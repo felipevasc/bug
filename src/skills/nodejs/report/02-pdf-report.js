@@ -420,8 +420,8 @@ function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
   const watchlistSeen = new Set();
   cveNotes.forEach((note) => {
     (note.data.watchlist || []).forEach((entry) => {
-      const ids = (entry.cves || []).map((c) => c.id || '').sort().join(',');
-      const key = `${entry.technology || entry.product || ''}:${entry.version || ''}:${ids}`;
+      if (!entry || !entry.cveId) return;
+      const key = `${entry.cveId}|${entry.tech?.vendor || ''}|${entry.tech?.product || ''}|${entry.tech?.version || ''}`;
       if (watchlistSeen.has(key)) return;
       watchlistSeen.add(key);
       watchlistEntries.push(entry);
@@ -430,34 +430,40 @@ function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
   const watchlistDisplay = watchlistEntries.slice(0, 5);
   const watchlistMore = Math.max(0, watchlistEntries.length - watchlistDisplay.length);
   const watchlistCards = watchlistDisplay.map((entry) => {
-    const techLabel = `${escapeHtml(entry.technology || entry.product || 'Technology')}${entry.version ? ` ${escapeHtml(entry.version)}` : ''}`;
-    const cveRows = (entry.cves || []).map((cve) => {
-      const cvssText = (cve.cvss !== null && cve.cvss !== undefined)
-        ? Number(cve.cvss).toFixed(1)
-        : 'n/a';
-      const severityTag = cvssSeverity(cve.cvss);
-      const references = (cve.references || []).slice(0, 3).map((ref) => `<code>${escapeHtml(ref)}</code>`).join(', ');
-      return `<div class="watchlist-cve">
-        ${badge(severityTag)}
-        <strong>${escapeHtml(cve.id || 'CVE')}</strong>
-        <div class="muted small">CVSS ${escapeHtml(cvssText)}${cve.published ? ` • ${escapeHtml(cve.published)}` : ''}</div>
-        <div class="muted small">${escapeHtml(cve.summary || 'Summary unavailable.')}</div>
-        ${references ? `<div class="muted small">Refs: ${references}</div>` : ''}
-      </div>`;
-    }).join('');
+    const techParts = [];
+    if (entry.tech) {
+      if (entry.tech.vendor) techParts.push(entry.tech.vendor);
+      if (entry.tech.product) techParts.push(entry.tech.product);
+      if (entry.tech.version) techParts.push(entry.tech.version);
+    }
+    const techLabel = techParts.length ? techParts.join(' ') : 'Technology';
+    const scoreText = entry.score !== null && entry.score !== undefined ? Number(entry.score).toFixed(1) : 'unknown';
+    const severityTag = entry.severityBand || 'info';
+    const references = (entry.references || []).slice(0, 3).map((ref) => `<code>${escapeHtml(ref)}</code>`).join(', ');
+    const summary = entry.title || entry.description || 'Summary unavailable.';
+    const applicability = entry.applicability
+      ? `<div class="muted small">Applicability: ${escapeHtml(entry.applicability)}</div>`
+      : '';
     const sourceLine = entry.sources && entry.sources.length
       ? `<div class="watchlist-sources">Sources: ${entry.sources.map((src) => `<code>${escapeHtml(src)}</code>`).join(', ')}</div>`
       : '';
     return `<div class="watchlist-card">
       <div class="card-title">Technology risk</div>
-      <div class="watchlist-tech"><strong>${techLabel}</strong></div>
-      ${cveRows}
+      <div class="watchlist-tech"><strong>${escapeHtml(techLabel)}</strong></div>
+      <div class="watchlist-cve">
+        ${badge(severityTag)}
+        <strong>${escapeHtml(entry.cveId)}</strong>
+        <div class="muted small">Score: ${escapeHtml(scoreText)}${entry.published ? ` • ${escapeHtml(entry.published)}` : ''}</div>
+        <div class="muted small">${escapeHtml(summary)}</div>
+        ${references ? `<div class="muted small">Refs: ${references}</div>` : ''}
+        ${applicability}
+      </div>
       ${sourceLine}
     </div>`;
   }).join('');
   const watchlistSection = watchlistDisplay.length
     ? `<div class="watchlist-grid">${watchlistCards}${watchlistMore > 0 ? `<p class="muted small">+${watchlistMore} additional watchlist entries captured in the run.</p>` : ''}</div>`
-    : '<div class="callout ok"><b>No MED/HIGH CVEs</b> were flagged by the enrichment watchlist.</div>';
+    : '<div class="callout ok"><b>No CVE enrichment candidates</b> were surfaced by the watchlist.</div>';
 
   const limitationList = limitationNotes.length
     ? limitationNotes

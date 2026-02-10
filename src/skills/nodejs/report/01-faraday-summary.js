@@ -439,6 +439,66 @@ async function run({ target, emit, outDir, runTs }) {
   }
   lines.push('');
 
+  const watchlistNotes = notes.filter((n) => n.tool === 'cve-enrich' && n.data && Array.isArray(n.data.watchlist));
+  const watchlistMap = new Map();
+  watchlistNotes.forEach((note) => {
+    (note.data.watchlist || []).forEach((entry) => {
+      if (!entry || !entry.cveId) return;
+      const key = `${entry.cveId}|${entry.tech?.vendor || ''}|${entry.tech?.product || ''}|${entry.tech?.version || ''}`;
+      const existing = watchlistMap.get(key);
+      const scoreValue = entry.score !== null && entry.score !== undefined ? entry.score : -1;
+      if (!existing) {
+        watchlistMap.set(key, entry);
+        return;
+      }
+      const existingScore = existing.score !== null && existing.score !== undefined ? existing.score : -1;
+      if (scoreValue > existingScore) {
+        watchlistMap.set(key, entry);
+      }
+    });
+  });
+  const watchlistList = Array.from(watchlistMap.values());
+  const watchlistHighMed = watchlistList.filter((entry) => ['high', 'med'].includes(String(entry.severityBand || '').toLowerCase())).length;
+  const watchlistUnknown = watchlistList.filter((entry) => entry.score === null || entry.score === undefined).length;
+  const severityPriority = { high: 0, med: 1, low: 2, info: 3, unknown: 4 };
+  const sortedWatchlist = [...watchlistList].sort((a, b) => {
+    const aSeverity = severityPriority[String(a.severityBand || 'unknown').toLowerCase()] ?? severityPriority.unknown;
+    const bSeverity = severityPriority[String(b.severityBand || 'unknown').toLowerCase()] ?? severityPriority.unknown;
+    if (aSeverity !== bSeverity) return aSeverity - bSeverity;
+    const aScore = a.score !== null && a.score !== undefined ? a.score : -1;
+    const bScore = b.score !== null && b.score !== undefined ? b.score : -1;
+    if (aScore !== bScore) return bScore - aScore;
+    return (a.cveId || '').localeCompare(b.cveId || '');
+  });
+  const watchlistTop = sortedWatchlist.slice(0, 5);
+
+  lines.push('## Technology risk watchlist (CVE enrichment)');
+  lines.push('');
+  if (!watchlistList.length) {
+    lines.push('_No CVE enrichment watchlist entries were emitted for this run._');
+  } else {
+    lines.push(`- ${mdEscape(String(watchlistList.length))} candidate CVE(s) captured; ${mdEscape(String(watchlistHighMed))} Medium/High and ${mdEscape(String(watchlistUnknown))} unknown score(s).`);
+    lines.push('');
+    lines.push('Top candidates:');
+    watchlistTop.forEach((entry, idx) => {
+      const techParts = [];
+      if (entry.tech) {
+        if (entry.tech.vendor) techParts.push(entry.tech.vendor);
+        if (entry.tech.product) techParts.push(entry.tech.product);
+        if (entry.tech.version) techParts.push(entry.tech.version);
+      }
+      const techLabel = techParts.length ? techParts.join(' ') : 'Technology';
+      const scoreText = entry.score !== null && entry.score !== undefined ? Number(entry.score).toFixed(1) : 'unknown';
+      const severityName = entry.severityBand === 'unknown' ? 'Unknown' : severityLabel(entry.severityBand);
+      const severityClause = severityName ? ` · ${mdEscape(severityName)}` : '';
+      const titleText = entry.title || entry.description || 'Title unavailable';
+      const trimmedTitle = titleText.replace(/\s+/g, ' ').trim();
+      const truncatedTitle = trimmedTitle.length > 120 ? `${trimmedTitle.slice(0, 117)}...` : trimmedTitle;
+      lines.push(`${idx + 1}. **${mdEscape(entry.cveId)}** (CVSS ${mdEscape(scoreText)}${severityClause}) — ${mdEscape(truncatedTitle)} — ${mdEscape(techLabel)}.`);
+    });
+  }
+  lines.push('');
+
   lines.push('## Input probe anomalies');
   lines.push('');
   if (!inputProbeFindings.length) {
