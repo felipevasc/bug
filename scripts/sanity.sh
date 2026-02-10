@@ -98,11 +98,12 @@ python3 -m py_compile src/skills/python/report/01-faraday-note.py
 echo "[sanity] shell smoke"
 # Keep sanity bounded even if external tools hang.
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-20}"
+# Prefer passing a timeout flag to the skills (more reliable than wrapping bash with timeout in some environments).
 if command -v timeout >/dev/null 2>&1; then
-  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/recon/01-subdomains.sh --target example.com >/dev/null || true
-  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/enum/01-dir-enum.sh --target example.com >/dev/null || true
-  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/exploit/01-sqli-test.sh --target example.com >/dev/null || true
-  timeout "$SMOKE_TIMEOUT" bash src/skills/shell/report/01-export.sh --target example.com >/dev/null || true
+  bash src/skills/shell/recon/01-subdomains.sh --target example.com --timeout "$SMOKE_TIMEOUT" >/dev/null || true
+  bash src/skills/shell/enum/01-dir-enum.sh --target example.com --timeout "$SMOKE_TIMEOUT" >/dev/null || true
+  bash src/skills/shell/exploit/01-sqli-test.sh --target example.com --timeout "$SMOKE_TIMEOUT" >/dev/null || true
+  bash src/skills/shell/report/01-export.sh --target example.com --timeout "$SMOKE_TIMEOUT" >/dev/null || true
 else
   bash src/skills/shell/recon/01-subdomains.sh --target example.com >/dev/null || true
   bash src/skills/shell/enum/01-dir-enum.sh --target example.com >/dev/null || true
@@ -114,7 +115,7 @@ echo "[sanity] pipeline dry-run count"
 # Guard against hangs even if runner timeouts don't fully interrupt in-process skills.
 tmp_out="$(mktemp)"
 if command -v timeout >/dev/null 2>&1; then
-  timeout 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json >/dev/null 2>"$tmp_out" || true
+  timeout -k 2 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json >/dev/null 2>"$tmp_out" || true
 else
   node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json >/dev/null 2>"$tmp_out" || true
 fi
@@ -124,7 +125,7 @@ echo "[sanity] pipeline dry-run JSONL parse"
 # Write JSONL to a temp file and validate with the repo validator.
 tmp_jsonl="$(mktemp)"
 if command -v timeout >/dev/null 2>&1; then
-  timeout 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null >"$tmp_jsonl" || true
+  timeout -k 2 25 node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null >"$tmp_jsonl" || true
 else
   node src/bin/run-pipeline.js --target example.com --dry-run --timeout 15 --pipeline scripts/pipeline.smoke.json 2>/dev/null >"$tmp_jsonl" || true
 fi

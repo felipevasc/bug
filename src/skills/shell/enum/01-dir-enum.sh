@@ -158,7 +158,7 @@ fi
 
 if command -v ffuf >/dev/null 2>&1; then
   out_json="${EV_DIR}/${TARGET}.ffuf.json"
-  timeout "${TIMEOUT}s" ffuf -u "${base}/FUZZ" -w "$wordlist" -ac -t 20 -rate "$RATE" -timeout "${TIMEOUT}" -of json -o "$out_json" >/dev/null 2>&1 || true
+  timeout --foreground "${TIMEOUT}s" ffuf -u "${base}/FUZZ" -w "$wordlist" -ac -t 20 -rate "$RATE" -timeout "${TIMEOUT}" -of json -o "$out_json" >/dev/null 2>&1 || true
   if [[ -s "$out_json" ]]; then
     # Extract interesting hits (2xx, 3xx, 401, 403) and emit one finding per hit.
     hits_tsv="${EV_DIR}/${TARGET}.ffuf.interesting.tsv"

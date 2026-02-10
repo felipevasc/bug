@@ -143,19 +143,20 @@ tmp="${EV_DIR}/${TARGET}.subdomains.raw.txt"
 : > "$tmp"
 
 if command -v subfinder >/dev/null 2>&1; then
-  timeout "${TIMEOUT}s" subfinder -silent -d "$TARGET" 2>/dev/null >>"$tmp" || true
+  # Ensure we hard-stop even if the tool ignores SIGTERM.
+  timeout -k 2s "${TIMEOUT}s" subfinder -silent -d "$TARGET" 2>/dev/null >>"$tmp" || true
 else
   emit_note "subfinder" "info" "tool not found; skipping"
 fi
 
 if command -v amass >/dev/null 2>&1; then
-  timeout "${TIMEOUT}s" amass enum -passive -d "$TARGET" 2>/dev/null >>"$tmp" || true
+  timeout -k 2s "${TIMEOUT}s" amass enum -passive -d "$TARGET" 2>/dev/null >>"$tmp" || true
 else
   emit_note "amass" "info" "tool not found; skipping"
 fi
 
 if command -v assetfinder >/dev/null 2>&1; then
-  timeout "${TIMEOUT}s" assetfinder --subs-only "$TARGET" 2>/dev/null >>"$tmp" || true
+  timeout -k 2s "${TIMEOUT}s" assetfinder --subs-only "$TARGET" 2>/dev/null >>"$tmp" || true
 else
   emit_note "assetfinder" "info" "tool not found; skipping"
 fi
