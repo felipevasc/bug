@@ -55,13 +55,23 @@ async function run({ target, emit, outDir, runTs }) {
   ensureDir(reportDir);
   const reportPath = path.join(reportDir, 'report.md');
 
-  const findings = records.filter((r) => r && r.type === 'finding');
+  let findings = records.filter((r) => r && r.type === 'finding');
   const assets = records.filter((r) => r && r.type === 'asset');
   const notes = records.filter((r) => r && r.type === 'note');
+
+  // De-duplicate findings to avoid repeated noisy entries.
+  const seen = new Set();
+  findings = findings.filter((f) => {
+    const key = [f.tool || '', f.stage || '', f.target || '', JSON.stringify(f.data || {})].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   findings.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
 
   const sevCounts = countBy(findings, (r) => r.severity || 'info');
+
   const lines = [];
   lines.push(`# Report: ${mdEscape(target)}`);
   lines.push('');
@@ -69,6 +79,27 @@ async function run({ target, emit, outDir, runTs }) {
   lines.push(`- Target: \`${mdEscape(target)}\``);
   lines.push(`- Records: ${records.length} (assets=${assets.length}, findings=${findings.length}, notes=${notes.length})`);
   lines.push('');
+
+  // --- Executive summary ---
+  const critN = sevCounts.get('crit') || 0;
+  const highN = sevCounts.get('high') || 0;
+  const medN = sevCounts.get('med') || 0;
+  const lowN = sevCounts.get('low') || 0;
+
+  lines.push('## Executive summary');
+  lines.push('');
+  if ((critN + highN + medN) === 0) {
+    lines.push('- No confirmed **high/critical** vulnerabilities were identified by this automated run.');
+  } else {
+    lines.push(`- Action required: **${critN} critical**, **${highN} high**, **${medN} medium** potential vulnerabilities identified.`);
+  }
+  if (lowN > 0) {
+    lines.push(`- **${lowN} low** severity issues were identified (mostly hardening/misconfig hygiene).`);
+  }
+  lines.push('- This report is based on automated recon/enum checks; exploitation is **not performed** unless explicitly allowed.');
+  lines.push('');
+
+  // --- Summary table ---
   lines.push('## Summary');
   lines.push('');
   lines.push('| Severity | Count |');
@@ -76,56 +107,101 @@ async function run({ target, emit, outDir, runTs }) {
   ['crit', 'high', 'med', 'low', 'info'].forEach((s) => lines.push(`| ${s} | ${sevCounts.get(s) || 0} |`));
   lines.push('');
 
-  // Triage
-  const findingsByTool = countBy(findings, (r) => r.tool || 'na');
-  const secHdrFindings = records.filter((r) => r && r.type === 'finding' && r.tool === 'security-headers');
-  const missingHdrCounts = countBy(secHdrFindings, (r) => (r.data && r.data.missing) ? String(r.data.missing) : 'unknown');
-  const findingsByTarget = countBy(findings, (r) => r.target || 'na');
-
-  lines.push('## Triage');
+  // --- What was tested / limitations ---
+  lines.push('## Scope & methodology');
+  lines.push('');
+  lines.push('- Inputs: URLs discovered via `httpx` + `curl` and related pipeline artifacts.');
+  lines.push('- Rate limiting: `--rate` propagated to tools when supported.');
+  lines.push('- Nuclei: runs templates by **tags** or a project allowlist (if configured), with separate *run budget* vs *per-request timeout*.' );
+  lines.push('- Limitations: missing tools are skipped; timeouts may cause partial coverage.');
   lines.push('');
 
-  lines.push('### Findings by tool');
+  // --- Classification (more intuitive) ---
+  const isHardening = (f) => f.tool === 'security-headers';
+  const isInformational = (f) => ['curl', 'whatweb', 'port-scan'].includes(String(f.tool || ''));
+  const isDiscovery = (f) => f.tool === 'ffuf';
+  const isPotentialVuln = (f) => !isHardening(f) && !isInformational(f) && !isDiscovery(f);
+
+  const potVuln = findings.filter(isPotentialVuln);
+  const hardening = findings.filter(isHardening);
+  const discovery = findings.filter(isDiscovery);
+  const info = findings.filter((f) => !isPotentialVuln(f) && !isHardening(f) && !isDiscovery(f));
+
+  lines.push('## Key items (triage)');
   lines.push('');
-  lines.push('| Tool | Count |');
-  lines.push('|---|---:|');
-  Array.from(findingsByTool.entries())
-    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
-    .forEach(([k, v]) => lines.push(`| ${mdEscape(k)} | ${v} |`));
+  if (potVuln.length === 0) {
+    lines.push('- Potential vulnerabilities: **none identified** by automated checks in this run.');
+  } else {
+    lines.push(`- Potential vulnerabilities: **${potVuln.length}** item(s).`);
+  }
+  lines.push(`- Hardening recommendations: **${hardening.length}** item(s).`);
+  lines.push(`- Discovery / interesting paths: **${discovery.length}** item(s).`);
   lines.push('');
 
-  lines.push('### Missing security headers (by header)');
+  // --- Hardening details (group missing headers per URL) ---
+  const secHdrFindings = findings.filter((r) => r && r.type === 'finding' && r.tool === 'security-headers');
+  const byUrl = new Map();
+  for (const f of secHdrFindings) {
+    const url = (f.data && f.data.url) ? String(f.data.url) : '';
+    const miss = (f.data && f.data.missing) ? String(f.data.missing) : '';
+    if (!url || !miss) continue;
+    if (!byUrl.has(url)) byUrl.set(url, new Set());
+    byUrl.get(url).add(miss);
+  }
+
+  lines.push('## Hardening recommendations');
   lines.push('');
-  if (secHdrFindings.length === 0) {
+  if (byUrl.size === 0) {
     lines.push('_None._');
   } else {
-    lines.push('| Header | Count |');
-    lines.push('|---|---:|');
-    Array.from(missingHdrCounts.entries())
-      .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
-      .forEach(([k, v]) => lines.push(`| ${mdEscape(k)} | ${v} |`));
+    lines.push('### Missing HTTP security headers');
+    lines.push('');
+    for (const [url, set] of Array.from(byUrl.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
+      const missing = Array.from(set.values()).sort();
+      lines.push(`- ${mdEscape(url)}: missing **${missing.map((x) => mdEscape(x)).join(', ')}**`);
+    }
   }
   lines.push('');
 
-  lines.push('### Top 10 targets by finding count');
+  // --- Discovery ---
+  lines.push('## Discovery / enumeration');
   lines.push('');
-  lines.push('| Target | Findings |');
-  lines.push('|---|---:|');
-  Array.from(findingsByTarget.entries())
-    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
-    .slice(0, 10)
-    .forEach(([k, v]) => lines.push(`| \`${mdEscape(k)}\` | ${v} |`));
+  const ffufFindings = findings.filter((r) => r && r.type === 'finding' && r.tool === 'ffuf');
+  if (ffufFindings.length === 0) {
+    lines.push('_None._');
+  } else {
+    // Only include a small, readable list.
+    ffufFindings.slice(0, 20).forEach((f) => {
+      const url = (f.data && f.data.url) ? String(f.data.url) : (f.target || '');
+      const status = (f.data && f.data.status !== undefined) ? String(f.data.status) : '';
+      lines.push(`- ffuf interesting path: ${mdEscape(url)}${status ? ` (status ${mdEscape(status)})` : ''}`);
+    });
+    if (ffufFindings.length > 20) lines.push(`- _(and ${ffufFindings.length - 20} more; see records.jsonl for details)_`);
+  }
   lines.push('');
 
-  lines.push('## Findings');
+  // --- Potential vulnerabilities (if any) ---
+  lines.push('## Potential vulnerabilities');
   lines.push('');
-  lines.push('| Severity | Tool | Stage | Target | What | Evidence |');
-  lines.push('|---|---|---|---|---|---|');
+  if (potVuln.length === 0) {
+    lines.push('_None identified by automated templates in this run._');
+  } else {
+    potVuln.forEach((f) => {
+      const ev = Array.isArray(f.evidence) ? f.evidence : [];
+      lines.push(`- **${mdEscape(f.severity)}** ${mdEscape(f.tool)} @ \`${mdEscape(f.target)}\`: ${mdEscape(f.data ? JSON.stringify(f.data) : '')}`);
+      if (ev.length) lines.push(`  - Evidence: ${ev.slice(0, 5).map((p) => `\`${mdEscape(p)}\``).join(', ')}`);
+    });
+  }
+  lines.push('');
+
+  // Keep the raw-ish table, but move it later and keep it compact.
+  lines.push('## Appendix: full findings (compact)');
+  lines.push('');
+  lines.push('| Severity | Tool | Stage | Target | What |');
+  lines.push('|---|---|---|---|---|');
   for (const f of findings) {
-    const ev = Array.isArray(f.evidence) ? f.evidence : [];
-    const evStr = ev.slice(0, 5).map((p) => `\`${mdEscape(p)}\``).join('<br>');
-    const what = mdEscape(f.data ? JSON.stringify(f.data).slice(0, 180) : '');
-    lines.push(`| ${mdEscape(f.severity)} | ${mdEscape(f.tool)} | ${mdEscape(f.stage)} | \`${mdEscape(f.target)}\` | ${what} | ${evStr} |`);
+    const what = mdEscape(f.data ? JSON.stringify(f.data).slice(0, 160) : '');
+    lines.push(`| ${mdEscape(f.severity)} | ${mdEscape(f.tool)} | ${mdEscape(f.stage)} | \`${mdEscape(f.target)}\` | ${what} |`);
   }
   lines.push('');
 
