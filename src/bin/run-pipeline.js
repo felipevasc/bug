@@ -15,6 +15,7 @@ const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
 const { normalizeRecord } = require('../lib/schema');
 const { loadScopeFile, targetInScope } = require('../lib/scope');
+const { normalizeTarget } = require('../lib/target');
 
 loadEnv();
 
@@ -93,12 +94,39 @@ function parseArgs(argv) {
   return args;
 }
 
+function buildTargetInfo(raw) {
+  const info = normalizeTarget(raw);
+  const host = info.host || '';
+  const url = info.kind === 'url' ? info.url : '';
+  const normalizedTarget = info.normalizedTarget || host || String(raw || '');
+  return {
+    raw: String(raw || ''),
+    kind: info.kind,
+    host,
+    url,
+    normalizedTarget
+  };
+}
+
+function targetKey(t) {
+  return t.normalizedTarget || t.host || t.raw;
+}
+
+function targetScopeValue(t) {
+  return t.url || t.host || t.raw;
+}
+
 function detectRunner(skillPath) {
   if (skillPath.endsWith('.js')) return { kind: 'node', path: skillPath };
   if (skillPath.endsWith('.py')) return { kind: 'python', path: skillPath };
   if (skillPath.endsWith('.sh')) return { kind: 'shell', path: skillPath };
   return { kind: 'raw', path: skillPath };
 }
+
+const URL_ARG_SKILLS = new Set([
+  path.resolve('src/skills/shell/enum/02-crawl-wget.sh'),
+  path.resolve('src/skills/python/exploit/01-ssrf-check.py')
+]);
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -132,7 +160,7 @@ function safeJsonParse(line) {
   }
 }
 
-async function runNodeSkillInProcess(skillPath, target, opts) {
+async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
   const abs = path.resolve(skillPath);
   // eslint-disable-next-line global-require, import/no-dynamic-require
   const mod = require(abs);
@@ -142,12 +170,15 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
     return { ok: false, code: 1, emitted: 0, parseErrors: 0, stderr: 'missing_run' };
   }
 
+  const targetHost = targetInfo.host || '';
+  const targetUrl = targetInfo.url || '';
+
   let emitted = 0;
   function emitRecord(raw) {
     const normalized = normalizeRecord(raw, {
       stage: opts.stage || 'unknown',
       tool: opts.tool || opts.sourceFallback || skillPath,
-      target
+      target: targetHost
     });
     const record = buildPayload({
       ...normalized,
@@ -162,9 +193,15 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
     if (!opts.dryRun) void ingestRecord(record);
   }
 
+  const prevTargetHost = process.env.TARGET_HOST;
+  const prevTargetUrl = process.env.TARGET_URL;
+  process.env.TARGET_HOST = targetHost;
+  process.env.TARGET_URL = targetUrl || '';
+
   try {
     const runPromise = Promise.resolve(run({
-      target,
+      target: targetHost,
+      url: targetUrl || undefined,
       emit: emitRecord,
       outDir: opts.outDir,
       scopeFile: opts.scopeFile,
@@ -195,7 +232,7 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
         type: 'note',
         tool: 'runner-timeout',
         stage: opts.stage || 'unknown',
-        target,
+        target: targetHost,
         severity: 'info',
         evidence: [],
         data: { timed_out: true, timeout_sec: t, kind: 'node_in_process' },
@@ -208,27 +245,39 @@ async function runNodeSkillInProcess(skillPath, target, opts) {
     }
 
     return { ok: false, code: 1, emitted, parseErrors: 0, stderr: msg };
+  } finally {
+    if (typeof prevTargetHost === 'undefined') delete process.env.TARGET_HOST;
+    else process.env.TARGET_HOST = prevTargetHost;
+    if (typeof prevTargetUrl === 'undefined') delete process.env.TARGET_URL;
+    else process.env.TARGET_URL = prevTargetUrl;
   }
 }
 
-async function runSkillOnce(skillPath, target, opts) {
+async function runSkillOnce(skillPath, targetInfo, opts) {
   const runner = detectRunner(skillPath);
+  const targetHost = targetInfo.host || '';
+  const targetUrl = targetInfo.url || '';
 
   if (runner.kind === 'node') {
-    return runNodeSkillInProcess(skillPath, target, opts);
+    return runNodeSkillInProcess(skillPath, targetInfo, opts);
   }
 
   let cmd = '';
   let argv = [];
   if (runner.kind === 'python') {
     cmd = 'python3';
-    argv = [runner.path, '--target', target];
+    argv = [runner.path, '--target', targetHost];
   } else if (runner.kind === 'shell') {
     cmd = 'bash';
-    argv = [runner.path, '--target', target];
+    argv = [runner.path, '--target', targetHost];
   } else {
     cmd = runner.path;
-    argv = ['--target', target];
+    argv = ['--target', targetHost];
+  }
+
+  const absSkillPath = path.resolve(skillPath);
+  if (targetUrl && URL_ARG_SKILLS.has(absSkillPath)) {
+    argv.push('--url', targetUrl);
   }
 
   if (opts.outDir) argv.push('--out-dir', String(opts.outDir));
@@ -241,6 +290,8 @@ async function runSkillOnce(skillPath, target, opts) {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
+      TARGET_HOST: targetHost,
+      TARGET_URL: targetUrl || '',
       RUN_TS: opts.runTs || process.env.RUN_TS || '',
       OUT_DIR: opts.outDir || process.env.OUT_DIR || '',
       SCOPE_FILE: opts.scopeFile || process.env.SCOPE_FILE || '',
@@ -286,7 +337,7 @@ async function runSkillOnce(skillPath, target, opts) {
       const normalized = normalizeRecord(parsed.value, {
         stage: opts.stage || 'unknown',
         tool: opts.tool || opts.sourceFallback || skillPath,
-        target
+        target: targetHost
       });
       const record = buildPayload({
         ...normalized,
@@ -317,7 +368,7 @@ async function runSkillOnce(skillPath, target, opts) {
       type: 'note',
       tool: 'runner-timeout',
       stage: opts.stage || 'unknown',
-      target,
+      target: targetHost,
       severity: 'info',
       evidence: [],
       data: { timed_out: true, timeout_sec: killAfterSecs, cmd, argv },
@@ -336,7 +387,7 @@ async function runSkillOnce(skillPath, target, opts) {
       const normalized = normalizeRecord(parsed.value, {
         stage: opts.stage || 'unknown',
         tool: opts.tool || opts.sourceFallback || skillPath,
-        target
+        target: targetHost
       });
       const record = buildPayload({
         ...normalized,
@@ -391,10 +442,15 @@ async function main() {
   function extractTargets(record) {
     if (!record || record.type !== 'asset') return [];
     const out = [];
-    if (record.target) out.push(record.target);
+    const add = (value) => {
+      if (!value) return;
+      const info = normalizeTarget(value);
+      if (info && info.host) out.push(info.host);
+    };
+    if (record.target) add(record.target);
     const data = record.data || {};
-    if (typeof data.ip === 'string' && data.ip) out.push(data.ip);
-    if (Array.isArray(data.hostnames)) out.push(...data.hostnames.filter(Boolean));
+    if (typeof data.ip === 'string' && data.ip) add(data.ip);
+    if (Array.isArray(data.hostnames)) data.hostnames.filter(Boolean).forEach(add);
     return out;
   }
 
@@ -403,11 +459,27 @@ async function main() {
   const scope = loadScopeFile(args.scopeFile).entries;
   function inScopeOrAllowAll(t) {
     if (!args.scopeFile) return true;
-    return targetInScope(t, scope);
+    return targetInScope(targetScopeValue(t), scope);
   }
 
-  let stageTargets = [...args.targets].filter((t) => inScopeOrAllowAll(t));
-  const initialFiltered = args.targets.filter((t) => !inScopeOrAllowAll(t));
+  const targetInfos = [];
+  const targetSeen = new Set();
+  for (const raw of args.targets) {
+    const info = buildTargetInfo(raw);
+    if (!info.host && !info.url) continue;
+    const key = targetKey(info);
+    if (targetSeen.has(key)) continue;
+    targetSeen.add(key);
+    targetInfos.push(info);
+  }
+
+  if (targetInfos.length === 0) {
+    process.stderr.write('[runner] no valid targets after normalization\n');
+    process.exit(1);
+  }
+
+  let stageTargets = targetInfos.filter((t) => inScopeOrAllowAll(t));
+  const initialFiltered = targetInfos.filter((t) => !inScopeOrAllowAll(t));
   if (initialFiltered.length > 0) {
     process.stderr.write(`[runner] scope blocked ${initialFiltered.length} initial target(s)\n`);
   }
@@ -416,11 +488,13 @@ async function main() {
     if (stage && stage.name === 'exploit') {
       const okGate = Boolean(args.allowExploit);
       if (!okGate) {
+        const gateTarget = stageTargets[0] || targetInfos[0] || null;
+        const gateTargetHost = gateTarget ? (gateTarget.host || gateTarget.normalizedTarget || gateTarget.raw) : '';
         const record = buildPayload({
           type: 'note',
           tool: 'intrusive-gate',
           stage: stage.name,
-          target: stageTargets[0] || args.targets[0] || '',
+          target: gateTargetHost,
           severity: 'info',
           evidence: [],
           data: { intrusive_actions: 'blocked', required: '--allow-exploit' },
@@ -444,7 +518,7 @@ async function main() {
     for (const skillRef of skills) {
       const skillPath = path.isAbsolute(skillRef) ? skillRef : path.resolve(pipelineDir, skillRef);
       for (const target of stageTargets) {
-        process.stderr.write(`[runner] stage=${stage.name} skill=${skillRef} target=${target}\n`);
+        process.stderr.write(`[runner] stage=${stage.name} skill=${skillRef} target=${target.normalizedTarget}\n`);
         // eslint-disable-next-line no-await-in-loop
         const res = await runSkillOnce(skillPath, target, {
           dryRun: args.dryRun,
@@ -472,11 +546,22 @@ async function main() {
     }
 
     if (propagateAssets && discovered.size > 0) {
-      const next = new Set(stageTargets);
-      discovered.forEach((t) => {
-        if (inScopeOrAllowAll(t)) next.add(t);
+      const next = new Map();
+      const hostSet = new Set();
+      stageTargets.forEach((t) => {
+        next.set(targetKey(t), t);
+        if (t.host) hostSet.add(t.host);
       });
-      stageTargets = Array.from(next);
+
+      discovered.forEach((raw) => {
+        const info = buildTargetInfo(raw);
+        if (!info.host) return;
+        if (hostSet.has(info.host)) return;
+        if (!inScopeOrAllowAll(info)) return;
+        next.set(targetKey(info), info);
+        hostSet.add(info.host);
+      });
+      stageTargets = Array.from(next.values());
 
       if (maxTargets > 0 && stageTargets.length > maxTargets) {
         process.stderr.write(`[runner] max-targets cap: ${stageTargets.length} -> ${maxTargets}\n`);

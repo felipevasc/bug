@@ -4,33 +4,30 @@
 const fs = require('fs');
 const net = require('net');
 const { URL } = require('url');
+const { normalizeTarget, normalizeHost } = require('./target');
 
 function normalizeLine(s) {
   return String(s || '').trim();
+}
+
+function isCidrEntry(s) {
+  return /^\d+\.\d+\.\d+\.\d+\/\d{1,2}$/.test(String(s || '').trim());
 }
 
 function normalizeScopeEntry(raw) {
   const line = normalizeLine(raw);
   if (!line) return null;
 
-  // Accept common "scope" formats: URL, host:port, plain host, IP, CIDR.
-  try {
-    if (/^https?:\/\//i.test(line)) {
-      const u = new URL(line);
-      return (u.hostname || '').toLowerCase().replace(/\.$/, '');
-    }
-  } catch (_e) {
-    // fall through
+  if (isIp(line) || isCidrEntry(line)) return line;
+
+  if (line.startsWith('*.')) {
+    const root = normalizeHost(line.slice(2));
+    return root ? `*.${root}` : null;
   }
 
-  // Strip path/query fragments if someone pasted a URL without scheme.
-  const noPath = line.split('/')[0];
-
-  // host:port -> host (IPv4/hostname only; repo doesn't claim IPv6 support)
-  const m = /^(.+):(\d{1,5})$/.exec(noPath);
-  if (m) return String(m[1]).toLowerCase().replace(/\.$/, '');
-
-  return String(noPath).toLowerCase().replace(/\.$/, '');
+  const info = normalizeTarget(line);
+  if (info.kind === 'url') return info.normalizedTarget;
+  return normalizeHost(info.host || line);
 }
 
 function isIp(s) {
@@ -56,9 +53,34 @@ function cidrToRange(cidr) {
   return { start, end };
 }
 
+function pathFromUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    return u.pathname || '/';
+  } catch (_e) {
+    return '/';
+  }
+}
+
+function normalizePathPrefix(p) {
+  if (!p || p === '/') return '/';
+  let out = String(p);
+  if (!out.startsWith('/')) out = `/${out}`;
+  if (out.length > 1 && out.endsWith('/')) out = out.slice(0, -1);
+  return out;
+}
+
+function pathMatchesPrefix(targetPath, entryPath) {
+  const prefix = normalizePathPrefix(entryPath);
+  if (prefix === '/') return true;
+  const targetNorm = normalizePathPrefix(targetPath);
+  if (targetNorm === prefix) return true;
+  return targetNorm.startsWith(prefix) && targetNorm[prefix.length] === '/';
+}
+
 function hostnameInScope(host, entry) {
-  const h = String(host || '').toLowerCase().replace(/\.$/, '');
-  const e = String(entry || '').toLowerCase().replace(/\.$/, '');
+  const h = normalizeHost(host);
+  const e = normalizeHost(entry);
   if (!h || !e) return false;
   if (e.startsWith('*.')) {
     const root = e.slice(2);
@@ -92,7 +114,7 @@ function targetInScope(target, entries) {
     if (ipInt === null) return false;
     for (const e of entries) {
       if (isIp(e) && e === t) return true;
-      if (e.includes('/')) {
+      if (isCidrEntry(e)) {
         const r = cidrToRange(e);
         if (r && ipInt >= r.start && ipInt <= r.end) return true;
       }
@@ -101,10 +123,32 @@ function targetInScope(target, entries) {
   }
 
   // Hostname/domain
+  const tInfo = normalizeTarget(t);
+  const tHost = normalizeHost(tInfo.host || t);
+  const tPath = tInfo.kind === 'url' ? pathFromUrl(tInfo.url) : '';
   for (const e of entries) {
-    // ignore pure IP/CIDR lines for hostname checks
-    if (isIp(e) || e.includes('/')) continue;
-    if (hostnameInScope(t, e)) return true;
+    if (!e) continue;
+    const entry = String(e).trim();
+    if (!entry) continue;
+    if (isIp(entry) || isCidrEntry(entry)) continue;
+
+    let entryHost = '';
+    let entryPath = '';
+    if (entry.startsWith('*.')) {
+      entryHost = `*.${normalizeHost(entry.slice(2))}`;
+    } else {
+      const eInfo = normalizeTarget(entry);
+      entryHost = eInfo.kind === 'url' ? eInfo.host : normalizeHost(eInfo.host || entry);
+      if (eInfo.kind === 'url') entryPath = pathFromUrl(eInfo.url);
+    }
+
+    if (!entryHost) continue;
+    if (!hostnameInScope(tHost, entryHost)) continue;
+    if (entryPath && entryPath !== '/') {
+      if (!tInfo || tInfo.kind !== 'url') continue;
+      if (!pathMatchesPrefix(tPath, entryPath)) continue;
+    }
+    return true;
   }
   return false;
 }
