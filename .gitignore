@@ -14,6 +14,9 @@ yarn-error.log*
 /data/tmp/
 /data/reports/
 
+# Codex/runner stray artifacts
+--timeout/
+
 # Python
 __pycache__/
 *.pyc
