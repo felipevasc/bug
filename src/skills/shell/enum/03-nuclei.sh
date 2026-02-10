@@ -195,13 +195,46 @@ emit_note "nuclei" "info" "running nuclei on ${cnt} urls (rate=${RATE}, run_time
 
 # Note: templates location is managed by nuclei itself (templates installed under ~/.local/nuclei-templates).
 # Use tags/categories to keep it safe.
+# Optionally force an explicit allowlist of templates (one per line, relative to templates root).
+TEMPL_ROOT="${NUCLEI_TEMPLATES_DIR:-$HOME/.local/nuclei-templates}"
+ALLOWLIST_REL="${NUCLEI_ALLOWLIST:-}"
+ALLOWLIST_FILE=""
+NUCLEI_ARGS=(
+  -silent
+  -jsonl
+  -rl "$RATE"
+  -timeout "$REQ_TIMEOUT"
+)
+if [[ -n "$ALLOWLIST_REL" && -f "$ALLOWLIST_REL" ]]; then
+  ALLOWLIST_FILE="${EV_DIR}/${TARGET}.nuclei.allowlist.txt"
+  # Build an absolute-path allowlist for nuclei.
+  python3 - "$TEMPL_ROOT" "$ALLOWLIST_REL" >"$ALLOWLIST_FILE" <<'PY'
+import sys
+from pathlib import Path
+root=Path(sys.argv[1]).expanduser()
+allow=Path(sys.argv[2])
+lines=[ln.split('#',1)[0].strip() for ln in allow.read_text(encoding='utf-8',errors='ignore').splitlines()]
+lines=[ln for ln in lines if ln]
+out=[]
+for rel in lines:
+  p=(root/rel).resolve()
+  if p.is_file():
+    out.append(str(p))
+print("\n".join(out))
+PY
+  if [[ -s "$ALLOWLIST_FILE" ]]; then
+    emit_note "nuclei" "info" "using allowlist templates file=${ALLOWLIST_REL} (resolved=$(wc -l <"$ALLOWLIST_FILE" | tr -d ' '))"
+    NUCLEI_ARGS+=( -t "$ALLOWLIST_FILE" )
+  else
+    emit_note "nuclei" "info" "allowlist provided but resolved to 0 templates; falling back to tags"
+    NUCLEI_ARGS+=( -tags misconfig,exposure,exposures,headers,cve -severity info,low,medium,high,critical )
+  fi
+else
+  NUCLEI_ARGS+=( -tags misconfig,exposure,exposures,headers,cve -severity info,low,medium,high,critical )
+fi
+
 cat "$urls_txt" | timeout "${RUN_TIMEOUT}s" nuclei \
-  -silent \
-  -jsonl \
-  -rl "$RATE" \
-  -timeout "$REQ_TIMEOUT" \
-  -tags misconfig,exposure,exposures,headers,cve \
-  -severity info,low,medium,high,critical \
+  "${NUCLEI_ARGS[@]}" \
   2>"${EV_DIR}/${TARGET}.nuclei.stderr.txt" \
   | tee "$out_jsonl" >/dev/null || true
 
