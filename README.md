@@ -95,6 +95,8 @@ Uso:
 ```bash
 node src/bin/run-pipeline.js --target example.com --dry-run
 node src/bin/run-pipeline.js --target example.com --workspace myws
+node src/bin/run-pipeline.js --targets-file data/targets.txt --dry-run
+cat data/targets.txt | node src/bin/run-pipeline.js --stdin --dry-run
 ```
 
 Observacoes:
@@ -105,6 +107,9 @@ Observacoes:
 ## Targets (domain ou URL)
 
 - `--target` aceita host simples (`example.com`) ou URL completa (`https://example.com/app`).
+- Multi-target:
+  - `--targets-file <path>`: 1 target por linha (ignora linhas vazias e linhas comecando com `#`).
+  - `--stdin`: le targets do stdin (mesmas regras do `--targets-file`).
 - Se a URL nao tiver esquema, o runner assume `https://`.
 - O runner passa `--target` como **host** para as skills e exporta `TARGET_HOST` e `TARGET_URL` (quando houver URL). Algumas skills aceitam `--url` para usar o caminho completo.
 
