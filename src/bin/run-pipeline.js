@@ -118,6 +118,24 @@ function detectRunner(skillPath) {
   return { kind: 'raw', path: skillPath };
 }
 
+function normalizeSkillEntry(entry) {
+  if (typeof entry === 'string') {
+    return { ref: entry, timeoutSec: null };
+  }
+  if (entry && typeof entry === 'object') {
+    const ref = entry.path || entry.skill || entry.ref;
+    const timeoutMs = Number(entry.timeout_ms || entry.timeoutMs || 0);
+    const timeoutS = Number(entry.timeout_s || entry.timeoutSec || entry.timeout_sec || entry.timeout || 0);
+
+    let timeoutSec = null;
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) timeoutSec = Math.ceil(timeoutMs / 1000);
+    if (Number.isFinite(timeoutS) && timeoutS > 0) timeoutSec = timeoutS;
+
+    return { ref, timeoutSec };
+  }
+  return { ref: null, timeoutSec: null };
+}
+
 const URL_ARG_SKILLS = new Set([
   path.resolve('src/skills/shell/enum/02-crawl-wget.sh'),
   path.resolve('src/skills/python/exploit/01-ssrf-check.py'),
@@ -634,8 +652,18 @@ async function main() {
         extractTargets(rec).forEach((t) => discovered.add(t));
       };
 
-      for (const skillRef of skills) {
+      for (const skillEntry of skills) {
+        const norm = normalizeSkillEntry(skillEntry);
+        const skillRef = norm.ref;
+        if (!skillRef) {
+          process.stderr.write(`[runner] invalid skill entry in pipeline: ${JSON.stringify(skillEntry)}\n`);
+          skillFailures += 1;
+          continue;
+        }
+
+        const effectiveTimeout = norm.timeoutSec != null ? String(norm.timeoutSec) : args.timeout;
         const skillPath = path.isAbsolute(skillRef) ? skillRef : path.resolve(pipelineDir, skillRef);
+
         for (const target of stageTargets) {
           process.stderr.write(`[runner] stage=${stage.name} skill=${skillRef} target=${target.normalizedTarget}\n`);
           skillsInvoked += 1;
@@ -653,7 +681,7 @@ async function main() {
             outDir,
             scopeFile: args.scopeFile,
             rate: args.rate,
-            timeout: args.timeout,
+            timeout: effectiveTimeout,
             allowExploit: args.allowExploit,
             allowVuln: args.allowVuln,
             confirm: args.confirm,

@@ -12,7 +12,7 @@
     {
       "name": "enum",
       "skills": [
-        "../src/skills/nodejs/enum/01-http-enum.js",
+        { "path": "../src/skills/nodejs/enum/01-http-enum.js", "timeout_s": 20 },
         "../src/skills/shell/enum/02-crawl-wget.sh"
       ]
     },
