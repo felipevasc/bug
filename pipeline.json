@@ -13,14 +13,10 @@
       "name": "enum",
       "skills": [
         "src/skills/nodejs/enum/01-http-enum.js",
+        "src/skills/shell/enum/02-crawl-wget.sh",
+        "src/skills/shell/enum/01-dir-enum.sh",
         "src/skills/python/enum/01-port-scan.py",
-        "src/skills/shell/enum/01-dir-enum.sh"
-      ]
-    },
-    {
-      "name": "vuln",
-      "skills": [
-        "src/skills/shell/vuln/01-nuclei.sh"
+        "src/skills/shell/enum/03-nuclei.sh"
       ]
     },
     {

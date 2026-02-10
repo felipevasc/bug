@@ -244,7 +244,8 @@ async function runSkillOnce(skillPath, target, opts) {
       RUN_TS: opts.runTs || process.env.RUN_TS || '',
       OUT_DIR: opts.outDir || process.env.OUT_DIR || '',
       SCOPE_FILE: opts.scopeFile || process.env.SCOPE_FILE || '',
-      CONFIRM: opts.confirm || process.env.CONFIRM || ''
+      CONFIRM: opts.confirm || process.env.CONFIRM || '',
+      ALLOW_VULN: opts.allowVuln ? '1' : (process.env.ALLOW_VULN || '')
     }
   });
 
@@ -434,28 +435,6 @@ async function main() {
       }
     }
 
-    if (stage && stage.name === 'vuln') {
-      const okGate = Boolean(args.allowVuln);
-      if (!okGate) {
-        const record = buildPayload({
-          type: 'note',
-          tool: 'vuln-gate',
-          stage: stage.name,
-          target: stageTargets[0] || args.targets[0] || '',
-          severity: 'info',
-          evidence: [],
-          data: { blocked: true, required: '--allow-vuln' },
-          source: 'src/bin/run-pipeline.js',
-          workspace: args.workspace
-        });
-        process.stdout.write(`${JSON.stringify(record)}\n`);
-        recordsStream.write(`${JSON.stringify(record)}\n`);
-        if (!args.dryRun) void ingestRecord(record);
-        process.stderr.write('[runner] vuln stage blocked (missing --allow-vuln)\n');
-        continue;
-      }
-    }
-
     const skills = Array.isArray(stage.skills) ? stage.skills : [];
     const discovered = new Set();
     const onRecord = (rec) => {
@@ -480,6 +459,7 @@ async function main() {
           rate: args.rate,
           timeout: args.timeout,
           allowExploit: args.allowExploit,
+          allowVuln: args.allowVuln,
           confirm: args.confirm,
           runTs,
           recordsStream

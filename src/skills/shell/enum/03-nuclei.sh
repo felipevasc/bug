@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# @skill: shell/vuln/nuclei
-# @inputs: target[, out-dir, scope-file, rate, timeout]
+# @skill: shell/enum/nuclei
+# @inputs: target[, out-dir, scope-file, rate, timeout, allow-vuln]
 # @outputs: finding|note
 # @tools: nuclei
 
@@ -11,6 +11,7 @@ OUT_DIR=""
 SCOPE_FILE=""
 RATE=""
 TIMEOUT=""
+ALLOW_VULN_FLAG="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target) TARGET="${2:-}"; shift 2;;
@@ -18,6 +19,7 @@ while [[ $# -gt 0 ]]; do
     --scope-file) SCOPE_FILE="${2:-}"; shift 2;;
     --rate) RATE="${2:-}"; shift 2;;
     --timeout) TIMEOUT="${2:-}"; shift 2;;
+    --allow-vuln) ALLOW_VULN_FLAG="true"; shift 1;;
     *)
       if [[ -z "$TARGET" ]]; then TARGET="$1"; fi
       shift;;
@@ -35,7 +37,7 @@ RUN_TS="${RUN_TS:-}"
 if [[ -z "$RUN_TS" ]]; then RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"; fi
 ROOT_OUT="${OUT_DIR:-}"
 if [[ -z "$ROOT_OUT" ]]; then ROOT_OUT="data/runs/${RUN_TS}"; fi
-EV_DIR="${ROOT_OUT}/evidence/vuln/nuclei"
+EV_DIR="${ROOT_OUT}/evidence/enum/nuclei"
 mkdir -p "$EV_DIR"
 
 RATE="${RATE:-2}"
@@ -45,9 +47,14 @@ emit_note() {
   local tool="$1"; shift
   local sev="$1"; shift
   local msg="$1"; shift
-  printf '{"type":"note","tool":"%s","stage":"vuln","target":"%s","ts":"%s","timestamp":"%s","severity":"%s","evidence":[],"data":{"message":"%s"},"source":"src/skills/shell/vuln/01-nuclei.sh"}\n' \
+  printf '{"type":"note","tool":"%s","stage":"enum","target":"%s","ts":"%s","timestamp":"%s","severity":"%s","evidence":[],"data":{"message":"%s"},"source":"src/skills/shell/enum/03-nuclei.sh"}\n' \
     "$tool" "$TARGET" "$TS" "$TIMESTAMP" "$sev" "$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip())[1:-1])')"
 }
+
+if [[ "$ALLOW_VULN_FLAG" != "true" && "${ALLOW_VULN:-}" != "1" && "${ALLOW_VULN:-}" != "true" ]]; then
+  emit_note "vuln-gate" "info" "blocked by default; require --allow-vuln (or env ALLOW_VULN=1)"
+  exit 0
+fi
 
 if ! command -v nuclei >/dev/null 2>&1; then
   emit_note "nuclei" "info" "tool not found; skipping"
@@ -150,7 +157,7 @@ cat "$urls_txt" | timeout "${TIMEOUT}s" nuclei \
   | tee "$out_jsonl" >/dev/null || true
 
 # Emit records from nuclei output.
-python3 - "$out_jsonl" <<'PY'
+python3 - "$out_jsonl" "$TARGET" <<'PY'
 import json,sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -164,8 +171,9 @@ def emit(o):
   sys.stdout.write(json.dumps(o,separators=(',',':'))+'\n')
 
 p=Path(sys.argv[1])
+target_arg = sys.argv[2] if len(sys.argv) > 2 else ""
 if not p.exists() or p.stat().st_size==0:
-  emit({"type":"note","tool":"nuclei","stage":"vuln","target":"","severity":"info","evidence":[str(p)],"data":{"message":"nuclei produced no output"},"source":"src/skills/shell/vuln/01-nuclei.sh"})
+  emit({"type":"note","tool":"nuclei","stage":"enum","target":target_arg,"severity":"info","evidence":[str(p)],"data":{"message":"nuclei produced no output"},"source":"src/skills/shell/enum/03-nuclei.sh"})
   raise SystemExit(0)
 
 sev_map={"info":"info","low":"low","medium":"med","high":"high","critical":"crit"}
@@ -185,11 +193,11 @@ for line in p.read_text(encoding='utf-8',errors='ignore').splitlines():
   emit({
     "type":"finding",
     "tool":"nuclei",
-    "stage":"vuln",
+    "stage":"enum",
     "target": matched,
     "severity": severity,
     "evidence": [str(p)],
     "data": {"template": template, "name": name, "matcher": o.get('matcher-name') or o.get('matcherName')},
-    "source": "src/skills/shell/vuln/01-nuclei.sh"
+    "source": "src/skills/shell/enum/03-nuclei.sh"
   })
 PY
