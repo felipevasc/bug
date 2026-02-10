@@ -15,7 +15,7 @@ const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
 const { normalizeRecord } = require('../lib/schema');
 const { loadScopeFile, targetInScope } = require('../lib/scope');
-const { normalizeTarget } = require('../lib/target');
+const { parseTarget } = require('../lib/targets');
 
 loadEnv();
 
@@ -95,10 +95,10 @@ function parseArgs(argv) {
 }
 
 function buildTargetInfo(raw) {
-  const info = normalizeTarget(raw);
+  const info = parseTarget(raw);
   const host = info.host || '';
-  const url = info.kind === 'url' ? info.url : '';
-  const normalizedTarget = info.normalizedTarget || host || String(raw || '');
+  const url = info.kind === 'url' ? (info.url || '') : '';
+  const normalizedTarget = url || host || String(raw || '');
   return {
     raw: String(raw || ''),
     kind: info.kind,
@@ -116,6 +116,14 @@ function targetScopeValue(t) {
   return t.url || t.host || t.raw;
 }
 
+function compareTargets(a, b) {
+  const ka = String(targetKey(a) || '');
+  const kb = String(targetKey(b) || '');
+  if (ka < kb) return -1;
+  if (ka > kb) return 1;
+  return 0;
+}
+
 function detectRunner(skillPath) {
   if (skillPath.endsWith('.js')) return { kind: 'node', path: skillPath };
   if (skillPath.endsWith('.py')) return { kind: 'python', path: skillPath };
@@ -125,7 +133,8 @@ function detectRunner(skillPath) {
 
 const URL_ARG_SKILLS = new Set([
   path.resolve('src/skills/shell/enum/02-crawl-wget.sh'),
-  path.resolve('src/skills/python/exploit/01-ssrf-check.py')
+  path.resolve('src/skills/python/exploit/01-ssrf-check.py'),
+  path.resolve('src/skills/shell/exploit/01-sqli-test.sh')
 ]);
 
 function ensureDir(dirPath) {
@@ -454,7 +463,7 @@ async function main() {
     const out = [];
     const add = (value) => {
       if (!value) return;
-      const info = normalizeTarget(value);
+      const info = parseTarget(value);
       if (info && info.host) out.push(info.host);
     };
     if (record.target) add(record.target);
@@ -482,6 +491,7 @@ async function main() {
     targetSeen.add(key);
     targetInfos.push(info);
   }
+  targetInfos.sort(compareTargets);
 
   if (targetInfos.length === 0) {
     process.stderr.write('[runner] no valid targets after normalization\n');
@@ -572,6 +582,7 @@ async function main() {
         hostSet.add(info.host);
       });
       stageTargets = Array.from(next.values());
+      stageTargets.sort(compareTargets);
 
       if (maxTargets > 0 && stageTargets.length > maxTargets) {
         process.stderr.write(`[runner] max-targets cap: ${stageTargets.length} -> ${maxTargets}\n`);
