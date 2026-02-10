@@ -107,7 +107,7 @@ if raw_url:
 elif url_from_target:
   url = url_from_target
 
-print(f"{host}\\t{url}")
+print(f"{host}\t{url}")
 PY
 )"
 TARGET="${norm%%$'\t'*}"
