@@ -3,7 +3,7 @@
 
 /**
  * @skill: nodejs/enum/http-enum
- * @inputs: target[, out-dir, scope-file, rate, timeout]
+ * @inputs: target[, url, out-dir, scope-file, rate, timeout]
  * @outputs: asset|finding|note
  * @tools: httpx, whatweb, sslscan, nikto, curl
  */
@@ -40,16 +40,21 @@ function parseHttpxJsonLines(txt) {
   return Array.from(new Set(urls));
 }
 
-async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
+async function run({ target, url, emit, outDir, scopeFile, rate, timeout, runTs }) {
+  let targetUrl = url || process.env.TARGET_URL || '';
+  if (targetUrl && !/^https?:\/\//i.test(targetUrl)) {
+    targetUrl = `https://${targetUrl}`;
+  }
+  const scopeTarget = targetUrl || target;
   const scope = loadScopeFile(scopeFile);
-  if (!targetInScope(target, scope.entries)) {
+  if (!targetInScope(scopeTarget, scope.entries)) {
     emitJsonl(emit, {
       type: 'note',
       tool: 'scope',
       stage: STAGE,
       target,
       severity: 'info',
-      evidence: [`out_of_scope: ${target}`],
+      evidence: [`out_of_scope: ${scopeTarget}`],
       data: { reason: 'target not in scope (blocked)' },
       source: SOURCE
     });
@@ -80,14 +85,18 @@ async function run({ target, emit, outDir, scopeFile, rate, timeout, runTs }) {
       data: { skipped: true, reason: 'tool not found; using curl fallback' },
       source: SOURCE
     });
+    if (targetUrl) urls.push(targetUrl);
     urls.push(`https://${target}/`, `http://${target}/`);
   }
 
+  if (targetUrl) urls.push(targetUrl);
   let uniqueUrls = Array.from(new Set(urls));
 
   // If httpx is present but produced no output (DNS issues, WAF, etc.), try a curl-based fallback anyway.
   if (uniqueUrls.length === 0) {
-    uniqueUrls = [`https://${target}/`, `http://${target}/`];
+    uniqueUrls = [];
+    if (targetUrl) uniqueUrls.push(targetUrl);
+    uniqueUrls.push(`https://${target}/`, `http://${target}/`);
     emitJsonl(emit, {
       type: 'note',
       tool: 'http-enum',
@@ -245,11 +254,12 @@ if (require.main === module) {
   (async () => {
     const args = parseCommonArgs(process.argv.slice(2));
     if (!args.target) {
-      process.stderr.write('Usage: --target <host> [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec]\n');
+      process.stderr.write('Usage: --target <host> [--url url] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec]\n');
       process.exit(1);
     }
     await run({
       target: args.target,
+      url: args.url || process.env.TARGET_URL || '',
       emit: defaultEmit,
       outDir: args.outDir,
       scopeFile: args.scopeFile,

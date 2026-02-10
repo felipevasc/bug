@@ -102,6 +102,18 @@ Observacoes:
 - Skills em `python/` e `shell/` rodam como subprocessos e precisam aceitar `--target`.
 - Quando `pipeline.json` tem `options.propagate_assets=true`, o runner acumula novos alvos a partir de records `asset` e usa o conjunto expandido nas proximas etapas (a partir de `record.target`, `record.data.hostnames[]` e `record.data.ip` quando existirem).
 
+## Targets (domain ou URL)
+
+- `--target` aceita host simples (`example.com`) ou URL completa (`https://example.com/app`).
+- Se a URL nao tiver esquema, o runner assume `https://`.
+- O runner passa `--target` como **host** para as skills e exporta `TARGET_HOST` e `TARGET_URL` (quando houver URL). Algumas skills aceitam `--url` para usar o caminho completo.
+
+### Escopo com URL (simples)
+
+- Entradas do scope podem ser host ou URL.
+- Para URLs, a checagem usa o host (mesma regra de subdominios) e, se a URL tiver path diferente de `/`, exige prefixo de path correspondente.
+- Query/fragment sao ignorados para o match de escopo.
+
 ## Faraday (opcional)
 
 ### Variaveis

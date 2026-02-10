@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # @skill: shell/enum/crawl-wget
-# @inputs: target[, out-dir, scope-file, rate, timeout, crawl-full, update-wordlists]
+# @inputs: target[, url, out-dir, scope-file, rate, timeout, crawl-full, update-wordlists]
 # @outputs: note|asset
 # @tools: wget, python3, scripts/update-wordlists.sh
 
 TARGET=""
+URL=""
 OUT_DIR=""
 SCOPE_FILE=""
 RATE=""
@@ -18,6 +19,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
       TARGET="${2:-}"; shift 2 ;;
+    --url)
+      URL="${2:-}"; shift 2 ;;
     --out-dir)
       OUT_DIR="${2:-}"; shift 2 ;;
     --scope-file)
@@ -37,7 +40,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TARGET" ]]; then
-  echo "Usage: $0 --target <host> [--out-dir dir] [--scope-file file] [--timeout sec] [--rate n] [--crawl-full] [--update-wordlists]" >&2
+  echo "Usage: $0 --target <host> [--url url] [--out-dir dir] [--scope-file file] [--timeout sec] [--rate n] [--crawl-full] [--update-wordlists]" >&2
   exit 1
 fi
 
@@ -52,6 +55,7 @@ mkdir -p "$EV_DIR"
 
 TIMEOUT="${TIMEOUT:-60}"
 RATE="${RATE:-2}"
+if [[ -z "$URL" ]]; then URL="${TARGET_URL:-}"; fi
 
 emit_note() {
   local tool="$1"; shift
@@ -108,10 +112,19 @@ if [[ "$CRAWL_FULL" == "1" ]]; then
   WAIT="0.2"
 fi
 
-# Prefer https, fallback to http
-BASE_URL="https://${TARGET}/"
-if ! timeout "${TIMEOUT}s" wget -q --spider --timeout=10 --tries=1 "$BASE_URL" >/dev/null 2>&1; then
-  BASE_URL="http://${TARGET}/"
+# Prefer explicit URL when provided; otherwise probe https/http.
+if [[ -n "$URL" ]]; then
+  BASE_URL="$URL"
+  if [[ ! "$BASE_URL" =~ ^https?:// ]]; then
+    BASE_URL="https://${BASE_URL}"
+  fi
+  # Strip fragments for crawl base.
+  BASE_URL="${BASE_URL%%#*}"
+else
+  BASE_URL="https://${TARGET}/"
+  if ! timeout "${TIMEOUT}s" wget -q --spider --timeout=10 --tries=1 "$BASE_URL" >/dev/null 2>&1; then
+    BASE_URL="http://${TARGET}/"
+  fi
 fi
 
 OUT_SUBDIR="${EV_DIR}/${TARGET}"

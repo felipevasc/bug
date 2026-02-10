@@ -29,6 +29,7 @@ function parseCommonArgs(argv) {
     const k = argv[i];
     const v = argv[i + 1];
     if (k === '--target' && v) { args.target = v; i += 1; continue; }
+    if (k === '--url' && v) { args.url = v; i += 1; continue; }
     if (k === '--out-dir' && v) { args.outDir = v; i += 1; continue; }
     if (k === '--scope-file' && v) { args.scopeFile = v; i += 1; continue; }
     if (k === '--rate' && v) { args.rate = v; i += 1; continue; }

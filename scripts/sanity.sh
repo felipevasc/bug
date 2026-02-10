@@ -72,6 +72,7 @@ export PYTHONDONTWRITEBYTECODE=1
 echo "[sanity] node syntax checks"
 node --check scripts/new-skill.js
 node --check src/lib/faraday.js
+node --check src/lib/target.js
 node --check src/bin/run-pipeline.js
 node --check src/bin/faraday-ingest.js
 node --check src/bin/faraday-query.js
@@ -79,6 +80,7 @@ node --check src/skills/nodejs/recon/01-passive-recon.js
 node --check src/skills/nodejs/enum/01-http-enum.js
 node --check src/skills/nodejs/exploit/01-proof-of-concept.js
 node --check src/skills/nodejs/report/01-faraday-summary.js
+node scripts/test-target-normalization.js
 
 # Wordlists & crawl tooling
 node --check scripts/validate-jsonl.js

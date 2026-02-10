@@ -174,7 +174,15 @@ async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
   const targetUrl = targetInfo.url || '';
 
   let emitted = 0;
+  let acceptEmits = true;
+  function safeWrite(stream, line) {
+    if (!stream) return;
+    if (stream.writableEnded || stream.destroyed) return;
+    try { stream.write(line); } catch (_) { /* ignore */ }
+  }
+
   function emitRecord(raw) {
+    if (!acceptEmits) return;
     const normalized = normalizeRecord(raw, {
       stage: opts.stage || 'unknown',
       tool: opts.tool || opts.sourceFallback || skillPath,
@@ -188,7 +196,7 @@ async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
 
     emitted += 1;
     process.stdout.write(`${JSON.stringify(record)}\n`);
-    if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
+    safeWrite(opts.recordsStream, `${JSON.stringify(record)}\n`);
     if (typeof opts.onRecord === 'function') opts.onRecord(record);
     if (!opts.dryRun) void ingestRecord(record);
   }
@@ -223,6 +231,7 @@ async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
 
     return { ok: true, code: 0, emitted, parseErrors: 0, stderr: '' };
   } catch (err) {
+    acceptEmits = false;
     const msg = err && err.stack ? err.stack : String(err);
     process.stderr.write(`[runner] node skill failed: ${skillPath}: ${msg}\n`);
 
@@ -240,12 +249,13 @@ async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
         workspace: opts.workspace
       });
       process.stdout.write(`${JSON.stringify(record)}\n`);
-      if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
+      safeWrite(opts.recordsStream, `${JSON.stringify(record)}\n`);
       if (!opts.dryRun) void ingestRecord(record);
     }
 
     return { ok: false, code: 1, emitted, parseErrors: 0, stderr: msg };
   } finally {
+    acceptEmits = false;
     if (typeof prevTargetHost === 'undefined') delete process.env.TARGET_HOST;
     else process.env.TARGET_HOST = prevTargetHost;
     if (typeof prevTargetUrl === 'undefined') delete process.env.TARGET_URL;
