@@ -150,6 +150,29 @@ function formatSampleList(arr, limit = 5) {
   return items.map((v) => `\`${mdEscape(v)}\``).join(', ');
 }
 
+function getWatchlistKey(entry) {
+  if (!entry) return '';
+  return `${entry.cveId || ''}|${entry.tech?.vendor || ''}|${entry.tech?.product || ''}|${entry.tech?.version || ''}`;
+}
+
+function getWatchlistTimestamp(entry) {
+  if (!entry) return '';
+  return entry.timestamp || entry.ts || '';
+}
+
+function shouldReplaceWatchlistEntry(existing, candidate) {
+  if (!existing) return true;
+  const existingTs = getWatchlistTimestamp(existing);
+  const candidateTs = getWatchlistTimestamp(candidate);
+  if (candidateTs && existingTs && candidateTs !== existingTs) {
+    return candidateTs > existingTs;
+  }
+  const existingScore = existing.score !== null && existing.score !== undefined ? existing.score : -1;
+  const candidateScore = candidate.score !== null && candidate.score !== undefined ? candidate.score : -1;
+  if (candidateScore !== existingScore) return candidateScore > existingScore;
+  return true;
+}
+
 async function run({ target, emit, outDir, runTs }) {
   const rootOut = outDir || process.env.OUT_DIR || path.resolve('data', 'runs', runTs || 'run');
   const recordsPath = path.join(rootOut, 'records.jsonl');
@@ -444,22 +467,14 @@ async function run({ target, emit, outDir, runTs }) {
   watchlistNotes.forEach((note) => {
     (note.data.watchlist || []).forEach((entry) => {
       if (!entry || !entry.cveId) return;
-      const key = `${entry.cveId}|${entry.tech?.vendor || ''}|${entry.tech?.product || ''}|${entry.tech?.version || ''}`;
+      const key = getWatchlistKey(entry);
       const existing = watchlistMap.get(key);
-      const scoreValue = entry.score !== null && entry.score !== undefined ? entry.score : -1;
-      if (!existing) {
-        watchlistMap.set(key, entry);
-        return;
-      }
-      const existingScore = existing.score !== null && existing.score !== undefined ? existing.score : -1;
-      if (scoreValue > existingScore) {
+      if (!existing || shouldReplaceWatchlistEntry(existing, entry)) {
         watchlistMap.set(key, entry);
       }
     });
   });
   const watchlistList = Array.from(watchlistMap.values());
-  const watchlistHighMed = watchlistList.filter((entry) => ['high', 'med'].includes(String(entry.severityBand || '').toLowerCase())).length;
-  const watchlistUnknown = watchlistList.filter((entry) => entry.score === null || entry.score === undefined).length;
   const severityPriority = { high: 0, med: 1, low: 2, info: 3, unknown: 4 };
   const sortedWatchlist = [...watchlistList].sort((a, b) => {
     const aSeverity = severityPriority[String(a.severityBand || 'unknown').toLowerCase()] ?? severityPriority.unknown;
@@ -470,16 +485,23 @@ async function run({ target, emit, outDir, runTs }) {
     if (aScore !== bScore) return bScore - aScore;
     return (a.cveId || '').localeCompare(b.cveId || '');
   });
-  const watchlistTop = sortedWatchlist.slice(0, 5);
+  const watchlistTop = sortedWatchlist.slice(0, 8);
+  const severityCounts = countBy(watchlistList, (entry) => String(entry.severityBand || 'unknown').toLowerCase());
+  const exploitSignalCount = watchlistList.filter((entry) => entry.exploitSignal).length;
 
   lines.push('## Technology risk watchlist (CVE enrichment)');
   lines.push('');
   if (!watchlistList.length) {
     lines.push('_No CVE enrichment watchlist entries were emitted for this run._');
   } else {
-    lines.push(`- ${mdEscape(String(watchlistList.length))} candidate CVE(s) captured; ${mdEscape(String(watchlistHighMed))} Medium/High and ${mdEscape(String(watchlistUnknown))} unknown score(s).`);
+    const severityOrder = ['crit', 'high', 'med', 'low', 'info', 'unknown'];
+    const severitySummary = severityOrder
+      .map((label) => `${severityCounts.get(label) || 0} ${label}`)
+      .join(' · ');
+    lines.push(`- Severity breakdown: ${mdEscape(severitySummary)}.`);
+    lines.push(`- Exploit signal: ${mdEscape(String(exploitSignalCount))} of ${mdEscape(String(watchlistList.length))} entries reference public exploit sources.`);
     lines.push('');
-    lines.push('Top candidates:');
+    lines.push('Top CVEs:');
     watchlistTop.forEach((entry, idx) => {
       const techParts = [];
       if (entry.tech) {
@@ -489,12 +511,18 @@ async function run({ target, emit, outDir, runTs }) {
       }
       const techLabel = techParts.length ? techParts.join(' ') : 'Technology';
       const scoreText = entry.score !== null && entry.score !== undefined ? Number(entry.score).toFixed(1) : 'unknown';
-      const severityName = entry.severityBand === 'unknown' ? 'Unknown' : severityLabel(entry.severityBand);
-      const severityClause = severityName ? ` · ${mdEscape(severityName)}` : '';
-      const titleText = entry.title || entry.description || 'Title unavailable';
-      const trimmedTitle = titleText.replace(/\s+/g, ' ').trim();
-      const truncatedTitle = trimmedTitle.length > 120 ? `${trimmedTitle.slice(0, 117)}...` : trimmedTitle;
-      lines.push(`${idx + 1}. **${mdEscape(entry.cveId)}** (CVSS ${mdEscape(scoreText)}${severityClause}) — ${mdEscape(truncatedTitle)} — ${mdEscape(techLabel)}.`);
+      const impactLabel = entry.impact || 'Other';
+      const applicabilityLabel = entry.applicability || 'unknown';
+      const summaryText = entry.shortSummary ? mdEscape(entry.shortSummary) : 'Summary unavailable.';
+      const referenceLinks = (entry.references || []).slice(0, 3)
+        .map((ref) => {
+          const value = String(ref || '').trim();
+          return value ? `[${mdEscape(value)}](${value})` : '';
+        })
+        .filter(Boolean);
+      const refsText = referenceLinks.length ? ` References: ${referenceLinks.join(', ')}` : '';
+      const techNote = techLabel ? ` (Technology: ${mdEscape(techLabel)})` : '';
+      lines.push(`${idx + 1}. **${mdEscape(entry.cveId)}** (CVSS ${mdEscape(scoreText)}, Impact ${mdEscape(impactLabel)}, Applicability ${mdEscape(applicabilityLabel)}) — ${summaryText}${techNote}.${refsText}`);
     });
   }
   lines.push('');
