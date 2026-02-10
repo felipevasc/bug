@@ -356,9 +356,96 @@ PY
 if command -v rg >/dev/null 2>&1; then
   extract_urls "$BASE_URL" "$TARGET" "$OUT_SUBDIR" "$LOG_FILE" || true
 else
-  emit_note "wget" "info" "rg not found; skipping URL extraction"
-  : >"$URLS_INTERNAL"
-  : >"$URLS_EXTERNAL"
+  emit_note "wget" "info" "rg not found; using python fallback URL extraction"
+  python3 - "$TARGET" "$BASE_URL" "$URLS_INTERNAL" "$URLS_EXTERNAL" "$OUT_SUBDIR" "$LOG_FILE" <<'PY'
+import re,sys
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+target = sys.argv[1].strip().lower()
+base = sys.argv[2].strip()
+out_i = Path(sys.argv[3])
+out_e = Path(sys.argv[4])
+out_root = Path(sys.argv[5])
+log_file = Path(sys.argv[6])
+
+base_split = urlsplit(base)
+base_scheme = base_split.scheme or "https"
+
+URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+SCHEMELESS_RE = re.compile(r"(?<!:)//[^\s<>\"']+")
+PATH_RE = re.compile(r"(?<![A-Za-z0-9_\-/])(/[^\s<>\"']+)")
+
+
+def clean(s: str) -> str:
+  s=s.strip()
+  while s and s[-1] in ".,;:)]}>'\"":
+    s=s[:-1]
+  while s and s[0] in "<'\"(":
+    s=s[1:]
+  return s.strip()
+
+raw=[]
+if log_file.exists():
+  try:
+    txt=log_file.read_text(encoding='utf-8',errors='ignore')
+    raw += URL_RE.findall(txt)
+    # Location lines
+    for m in re.finditer(r"^Location:\s*(\S+)", txt, flags=re.M):
+      raw.append(m.group(1))
+  except Exception:
+    pass
+
+# scan downloaded text-ish files (bounded)
+for p in out_root.rglob('*'):
+  if not p.is_file():
+    continue
+  if p.suffix.lower() not in {'.html','.htm','.js','.mjs','.cjs','.css','.json','.xml','.txt','.svg'}:
+    continue
+  try:
+    if p.stat().st_size > 10*1024*1024:
+      continue
+  except Exception:
+    continue
+  try:
+    txt=p.read_text(encoding='utf-8',errors='ignore')
+  except Exception:
+    continue
+  raw += URL_RE.findall(txt)
+  raw += SCHEMELESS_RE.findall(txt)
+  raw += PATH_RE.findall(txt)
+
+internal=set(); external=set()
+
+def is_internal(h: str) -> bool:
+  return h==target or h.endswith('.'+target)
+
+for r in raw:
+  s=clean(r)
+  if not s:
+    continue
+  if s.startswith('//'):
+    s=f"{base_scheme}:{s}"
+  if s.startswith('/'):
+    s=f"{base_scheme}://{target}{s}"
+  if not (s.startswith('http://') or s.startswith('https://')):
+    continue
+  try:
+    sp=urlsplit(s)
+  except Exception:
+    continue
+  host=(sp.hostname or '').lower()
+  if not host:
+    continue
+  sp=sp._replace(fragment='')
+  s_norm=urlunsplit(sp)
+  (internal if is_internal(host) else external).add(s_norm)
+
+out_i.parent.mkdir(parents=True, exist_ok=True)
+out_e.parent.mkdir(parents=True, exist_ok=True)
+out_i.write_text('\n'.join(sorted(internal)) + ('\n' if internal else ''), encoding='utf-8')
+out_e.write_text('\n'.join(sorted(external)) + ('\n' if external else ''), encoding='utf-8')
+PY
 fi
 
 internal_count="$(wc -l <"$URLS_INTERNAL" | tr -d ' ')"
@@ -391,8 +478,7 @@ printf '{"type":"asset","tool":"subdomains","stage":"enum","target":"%s","ts":"%
   "$TARGET" "$TS" "$TIMESTAMP" \
   "$HOSTS_TXT" \
   "$(python3 -c 'import json,sys; print(json.dumps([ln.strip() for ln in open(sys.argv[1],encoding="utf-8",errors="ignore").read().splitlines() if ln.strip()]))' "$HOSTS_TXT")" \
-  "$internal_count" \
-  > /dev/stdout
+  "$internal_count"
 
 if [[ "$UPDATE_WORDLISTS" == "1" ]]; then
   WL_PATHS="wordlists/custom/paths.txt"
