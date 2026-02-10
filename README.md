@@ -104,6 +104,11 @@ Observacoes:
 - Skills em `python/` e `shell/` rodam como subprocessos e precisam aceitar `--target`.
 - Quando `pipeline.json` tem `options.propagate_assets=true`, o runner acumula novos alvos a partir de records `asset` e usa o conjunto expandido nas proximas etapas (a partir de `record.target`, `record.data.hostnames[]` e `record.data.ip` quando existirem).
 
+## Vulnerability stage notes
+
+- Passar `--allow-vuln` (ou expor `ALLOW_VULN=1`) habilita as skills ativas do estágio `vuln`, como o probe de inputs. Sem essa flag, a etapa apenas emite notas de skip.
+- A skill de enriquecimento de CVEs gera um watchlist com CVEs médios/altos (CVSS ≥ 4) alinhados às tecnologias detectadas. Ela é um alerta de risco, não um comprovante; confirme os CVEs manualmente antes de escalar.
+
 ## Targets (domain ou URL)
 
 - `--target` aceita host simples (`example.com`) ou URL completa (`https://example.com/app`).

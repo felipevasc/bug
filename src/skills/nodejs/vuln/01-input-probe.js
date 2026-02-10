@@ -22,6 +22,71 @@ const DEFAULT_RATE = 2;
 const DEFAULT_TIMEOUT = 15;
 const ERROR_REGEX = /(error|exception|stack|fatal|undefined|warning|sqlstate|trace)/i;
 const PAYLOAD_CATEGORIES = ['xss', 'sqli', 'ssrf', 'cmdi', 'traversal'];
+const STATIC_EXTENSIONS = new Set(['.js', '.css', '.png', '.jpg', '.jpeg', '.svg', '.woff', '.woff2', '.ttf', '.otf', '.ico', '.map', '.gif', '.bmp', '.webp']);
+const CACHE_BUSTER_PARAMS = new Set(['v']);
+const SCORE_WEIGHTS = {
+  error: 25,
+  'error-regex': 30,
+  'status-change': 20,
+  'length-change': 15,
+  'time-spike': 10
+};
+const CATEGORY_SIGNATURES = {
+  xss: /(\balert\b|<script|<img|javascript:|document\.cookie|onerror=|onload=)/i,
+  sqli: /(SQL syntax|SQLSTATE|mysql|syntax error|pg_|SQLite|ORA-|PDOException)/i,
+  ssrf: /(https?:\/\/[^\s]+)/i,
+  cmdi: /(command not found|sh:|bash:|powershell|cmd\.exe)/i,
+  traversal: /\.\.\/|\.\.\\|\/etc\/passwd|\\etc\\passwd/i
+};
+const CATEGORY_BONUS = 25;
+const MIN_SCORE_TO_REPORT = 30;
+const SCORE_THRESHOLDS = { high: 70, med: 45, low: 30 };
+
+function stripAnsi(text) {
+  return String(text || '').replace(/\u001b\[[0-9;]*m/g, '');
+}
+
+function hasStaticExtension(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const ext = path.extname(parsed.pathname || '').toLowerCase();
+    return STATIC_EXTENSIONS.has(ext);
+  } catch (_err) {
+    return false;
+  }
+}
+
+function usesCacheBuster(candidate) {
+  if (!candidate || !candidate.param) return false;
+  return CACHE_BUSTER_PARAMS.has(String(candidate.param).toLowerCase());
+}
+
+function isCandidateAllowed(candidate) {
+  if (!candidate || !candidate.baseUrl) return false;
+  if (hasStaticExtension(candidate.baseUrl)) return false;
+  if (usesCacheBuster(candidate)) return false;
+  return true;
+}
+
+function computeProbeScore(anomalies, category, bodyText) {
+  let score = 0;
+  for (const reason of anomalies) {
+    score += SCORE_WEIGHTS[reason] || 10;
+  }
+  const text = stripAnsi(bodyText || '');
+  const signature = CATEGORY_SIGNATURES[category];
+  const signatureMatched = Boolean(signature && signature.test(text));
+  if (signatureMatched) score += CATEGORY_BONUS;
+  return { score, signatureMatched };
+}
+
+function severityFromScore(score) {
+  if (score >= SCORE_THRESHOLDS.high) return 'high';
+  if (score >= SCORE_THRESHOLDS.med) return 'med';
+  if (score >= SCORE_THRESHOLDS.low) return 'low';
+  return 'info';
+}
 
 function allowVulnEnabled() {
   const fromEnv = String(process.env.ALLOW_VULN || '').trim() === '1';
@@ -478,7 +543,8 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
   const crawlBase = records.find((rec) => rec.tool === 'wget-crawl' && rec.data && rec.data.base_url);
   const crawlBaseUrl = crawlBase && crawlBase.data ? crawlBase.data.base_url : null;
   const forms = gatherForms(rootOut, target, crawlBaseUrl);
-  const candidates = buildCandidates(urls, forms, maxCandidates);
+  let candidates = buildCandidates(urls, forms, maxCandidates);
+  candidates = candidates.filter(isCandidateAllowed);
 
   if (!candidates.length) {
     emitJsonl(emit, {
@@ -544,14 +610,23 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
       const probeResult = await sendRequest(configuredTimeout, candidate, entry.payload);
       const anomalies = detectAnomalies(probeResult, baselineStats);
       if (!anomalies.length) continue;
+      const { score, signatureMatched } = computeProbeScore(anomalies, entry.category, probeResult.body);
+      if (score < MIN_SCORE_TO_REPORT) continue;
       anomalyCount += 1;
+      const scoringReasons = [...new Set(anomalies)];
+      if (signatureMatched) scoringReasons.push('category-signature');
       const snippetName = `${Date.now()}-${anomalyCount}-${safeFileSegment(candidate.param)}-${safeFileSegment(entry.category)}.json`;
       const snippetPath = writeEvidence(evidenceDir, snippetName, JSON.stringify({
         target,
         candidate,
         payload: entry.payload,
         category: entry.category,
-        anomaly: anomalies,
+        anomalies,
+        scoring: {
+          score,
+          reasons: scoringReasons,
+          signature_match: signatureMatched
+        },
         response: {
           status: probeResult.status,
           length: probeResult.length,
@@ -561,13 +636,14 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
         },
         timestamp: new Date().toISOString()
       }, null, 2));
+      const severity = severityFromScore(score);
 
       emitJsonl(emit, {
         type: 'finding',
         tool: 'input-probe',
         stage: STAGE,
         target,
-        severity: 'low',
+        severity,
         evidence: [snippetPath],
         data: {
           url: candidate.baseUrl,
@@ -575,6 +651,8 @@ async function run({ target, emit, outDir, rate, timeout, runTs }) {
           param: candidate.param,
           payload: entry.payload,
           category: entry.category,
+          score,
+          scoring_reasons: scoringReasons,
           anomalies,
           baseline: {
             status: baselineStats.statusMode,

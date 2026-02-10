@@ -22,7 +22,8 @@
     {
       "name": "vuln",
       "skills": [
-        "src/skills/nodejs/vuln/01-input-probe.js"
+        "src/skills/nodejs/vuln/01-input-probe.js",
+        "src/skills/nodejs/vuln/02-cve-enrich.js"
       ]
     },
     {

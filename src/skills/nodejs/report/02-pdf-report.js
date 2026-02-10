@@ -84,6 +84,14 @@ function severityLabel(s) {
   return labelMap[toSev(s)] || 'Informational';
 }
 
+function cvssSeverity(score) {
+  if (score === null || score === undefined) return 'info';
+  if (score >= 7) return 'high';
+  if (score >= 4) return 'med';
+  if (score > 0) return 'low';
+  return 'info';
+}
+
 function describeFinding(f) {
   if (!f || !f.data) return '';
   const keys = ['template', 'title', 'name', 'description', 'detail', 'info', 'match', 'payload'];
@@ -404,6 +412,53 @@ function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
     attackEntries.push(`Directory enumeration flagged ${ffuf.length} endpoints; sample: ${entries.join('; ')}.${discovered.more > 0 ? ` +${discovered.more} more` : ''}`);
   }
 
+  const cveNotes = notes
+    .filter((n) => n && n.tool === 'cve-enrich' && n.data && Array.isArray(n.data.watchlist));
+  const watchlistContext = cveNotes.find((n) => n && n.data && n.data.context)?.data?.context
+    || 'CVE enrichment is a technology risk watchlist; treat the findings as candidates for manual verification.';
+  const watchlistEntries = [];
+  const watchlistSeen = new Set();
+  cveNotes.forEach((note) => {
+    (note.data.watchlist || []).forEach((entry) => {
+      const ids = (entry.cves || []).map((c) => c.id || '').sort().join(',');
+      const key = `${entry.technology || entry.product || ''}:${entry.version || ''}:${ids}`;
+      if (watchlistSeen.has(key)) return;
+      watchlistSeen.add(key);
+      watchlistEntries.push(entry);
+    });
+  });
+  const watchlistDisplay = watchlistEntries.slice(0, 5);
+  const watchlistMore = Math.max(0, watchlistEntries.length - watchlistDisplay.length);
+  const watchlistCards = watchlistDisplay.map((entry) => {
+    const techLabel = `${escapeHtml(entry.technology || entry.product || 'Technology')}${entry.version ? ` ${escapeHtml(entry.version)}` : ''}`;
+    const cveRows = (entry.cves || []).map((cve) => {
+      const cvssText = (cve.cvss !== null && cve.cvss !== undefined)
+        ? Number(cve.cvss).toFixed(1)
+        : 'n/a';
+      const severityTag = cvssSeverity(cve.cvss);
+      const references = (cve.references || []).slice(0, 3).map((ref) => `<code>${escapeHtml(ref)}</code>`).join(', ');
+      return `<div class="watchlist-cve">
+        ${badge(severityTag)}
+        <strong>${escapeHtml(cve.id || 'CVE')}</strong>
+        <div class="muted small">CVSS ${escapeHtml(cvssText)}${cve.published ? ` • ${escapeHtml(cve.published)}` : ''}</div>
+        <div class="muted small">${escapeHtml(cve.summary || 'Summary unavailable.')}</div>
+        ${references ? `<div class="muted small">Refs: ${references}</div>` : ''}
+      </div>`;
+    }).join('');
+    const sourceLine = entry.sources && entry.sources.length
+      ? `<div class="watchlist-sources">Sources: ${entry.sources.map((src) => `<code>${escapeHtml(src)}</code>`).join(', ')}</div>`
+      : '';
+    return `<div class="watchlist-card">
+      <div class="card-title">Technology risk</div>
+      <div class="watchlist-tech"><strong>${techLabel}</strong></div>
+      ${cveRows}
+      ${sourceLine}
+    </div>`;
+  }).join('');
+  const watchlistSection = watchlistDisplay.length
+    ? `<div class="watchlist-grid">${watchlistCards}${watchlistMore > 0 ? `<p class="muted small">+${watchlistMore} additional watchlist entries captured in the run.</p>` : ''}</div>`
+    : '<div class="callout ok"><b>No MED/HIGH CVEs</b> were flagged by the enrichment watchlist.</div>';
+
   const limitationList = limitationNotes.length
     ? limitationNotes
     : ['All enabled tools completed without interruption; scope is limited to the configured skills.'];
@@ -467,6 +522,12 @@ function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
           ${attackEntries.map((line) => `<li>${line}</li>`).join('')}
         </ul>
       </div>
+    </section>
+
+    <section class="section">
+      <h2>Technology risk watchlist</h2>
+      <p class="muted">${escapeHtml(watchlistContext)}${watchlistEntries.length ? ` Top ${Math.min(5, watchlistEntries.length)} entries shown below.` : ''}</p>
+      ${watchlistSection}
     </section>
 
     <section class="section">
@@ -682,6 +743,43 @@ function htmlTemplate({ title, bodyHtml }) {
       margin-top: 6px;
       font-size: 12px;
       color: #475569;
+    }
+    .watchlist-grid {
+      margin-top: 12px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+    .watchlist-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      padding: 16px;
+      background: #fff;
+    }
+    .watchlist-tech {
+      margin-bottom: 8px;
+      font-size: 14px;
+      color: #0f172a;
+    }
+    .watchlist-cve {
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px dashed #e2e8f0;
+      font-size: 13px;
+      color: #0f172a;
+    }
+    .watchlist-cve:last-child {
+      border-bottom: 0;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+    .watchlist-cve p {
+      margin: 4px 0;
+    }
+    .watchlist-sources {
+      font-size: 12px;
+      color: #475569;
+      margin-top: 8px;
     }
     .hardening-grid {
       margin-top: 12px;
