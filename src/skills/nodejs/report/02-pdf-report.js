@@ -45,10 +45,118 @@ function badge(sev) {
   return `<span class="badge badge-${s}">${escapeHtml(s)}</span>`;
 }
 
-function table(headers, rows) {
+function table(headers, rows, opts = {}) {
   const th = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('');
   const body = rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('');
-  return `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+  const classAttr = opts.tableClass ? ` class="${opts.tableClass}"` : '';
+  const tableHtml = `<table${classAttr}><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+  return opts.noWrapper ? tableHtml : `<div class="table-wrapper">${tableHtml}</div>`;
+}
+
+function uniq(arr) {
+  return Array.from(new Set((arr || []).filter((v) => v)));
+}
+
+function capList(arr, n) {
+  const list = (arr || []).slice(0, n);
+  return { list, more: (arr || []).length - list.length };
+}
+
+function toSev(s) {
+  const v = String(s || '').toLowerCase();
+  if (v === 'critical') return 'crit';
+  if (v === 'high') return 'high';
+  if (v === 'medium') return 'med';
+  if (v === 'low') return 'low';
+  if (v === 'info' || v === 'informational') return 'info';
+  if (['crit', 'high', 'med', 'low', 'info'].includes(v)) return v;
+  return 'info';
+}
+
+function severityLabel(s) {
+  const labelMap = {
+    crit: 'Critical',
+    high: 'High',
+    med: 'Medium',
+    low: 'Low',
+    info: 'Informational'
+  };
+  return labelMap[toSev(s)] || 'Informational';
+}
+
+function describeFinding(f) {
+  if (!f || !f.data) return '';
+  const keys = ['template', 'title', 'name', 'description', 'detail', 'info', 'match', 'payload'];
+  for (const key of keys) {
+    const value = f.data[key];
+    if (value) return String(value);
+  }
+  return '';
+}
+
+function getUrlFromFinding(f) {
+  if (!f || !f.data) return '';
+  return String(f.data.url || f.data.effective_url || '');
+}
+
+function parseHost(u) {
+  try {
+    // eslint-disable-next-line no-new
+    const x = new URL(u);
+    return String(x.hostname || '').toLowerCase();
+  } catch (_e) {
+    return '';
+  }
+}
+
+function gatherHostsFromFinding(f) {
+  const hosts = [];
+  if (f && f.target) hosts.push(String(f.target));
+  const url = getUrlFromFinding(f);
+  if (url) {
+    const parsed = parseHost(url);
+    if (parsed) hosts.push(parsed);
+  }
+  return uniq(hosts);
+}
+
+function formatHostList(arr, limit = 4) {
+  const cleaned = uniq((arr || []).map((v) => String(v || '').trim()).filter(Boolean));
+  if (!cleaned.length) return '';
+  const quoted = cleaned.map((v) => `<code>${escapeHtml(v)}</code>`);
+  if (quoted.length <= limit) return quoted.join(', ');
+  return `${quoted.slice(0, limit).join(', ')} (+${quoted.length - limit} more)`;
+}
+
+function formatSampleList(arr, limit = 5) {
+  const cleaned = uniq((arr || []).filter(Boolean));
+  if (!cleaned.length) return '';
+  const entries = cleaned.slice(0, limit).map((v) => `<code>${escapeHtml(v)}</code>`);
+  if (cleaned.length <= limit) return entries.join(', ');
+  return `${entries.join(', ')} (+${cleaned.length - limit} more)`;
+}
+
+function countBy(arr, keyFn) {
+  const map = new Map();
+  (arr || []).forEach((item) => {
+    const key = keyFn(item);
+    map.set(key, (map.get(key) || 0) + 1);
+  });
+  return map;
+}
+
+function toPosixPath(p) {
+  return String(p || '').replace(/\\/g, '/');
+}
+
+function isProbablyNoiseFfufUrl(u) {
+  const s = String(u || '');
+  if (!s) return true;
+  if (s.includes('/# ')) return true;
+  if (s.includes('Curated paths/filenames')) return true;
+  if (s.includes('One token per line')) return true;
+  if (s.includes('Example:')) return true;
+  return false;
 }
 
 function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
@@ -64,113 +172,317 @@ function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
   };
 
   const subdomainAssets = assets.filter((r) => r.tool === 'subdomains' && r.data && Array.isArray(r.data.hostnames));
-  const subdomains = Array.from(new Set(subdomainAssets.flatMap((a) => a.data.hostnames))).sort();
+  const hostnames = uniq(subdomainAssets.flatMap((a) => (a.data && a.data.hostnames) ? a.data.hostnames : [])).sort();
 
-  const secHdr = findings.filter((r) => r.tool === 'security-headers');
-  const sslWeak = findings.filter((r) => r.tool === 'sslscan' && r.data && r.data.weak_protocols === true);
+  const dnsAssets = assets.filter((r) => r.tool === 'dns' && r.data && Array.isArray(r.data.all_a));
+  const ips = uniq(dnsAssets.flatMap((a) => (a.data && a.data.all_a) ? a.data.all_a : []));
 
-  const byMissing = new Map();
-  for (const f of secHdr) {
-    const k = (f.data && f.data.missing) ? String(f.data.missing) : 'unknown';
-    byMissing.set(k, (byMissing.get(k) || 0) + 1);
+  const openPorts = {};
+  findings
+    .filter((f) => f.tool === 'port-scan' && f.data && Array.isArray(f.data.open_ports))
+    .forEach((f) => { openPorts[f.target] = f.data.open_ports; });
+
+  const potentialVuln = findings.filter((f) => f.tool === 'nuclei');
+  const totalPotential = potentialVuln.length;
+  const summarySevCounts = countBy(potentialVuln, (r) => toSev(r.severity));
+  const severityOrder = ['crit', 'high', 'med', 'low', 'info'];
+  const severitySummary = severityOrder
+    .map((sev) => {
+      const count = summarySevCounts.get(sev) || 0;
+      return count ? `${count} ${sev}` : null;
+    })
+    .filter(Boolean);
+  const sortedPotential = [...potentialVuln].sort((a, b) => sevRank(b.severity) - sevRank(a.severity));
+
+  const hdrFindings = findings.filter((f) => f.tool === 'security-headers' && f.data && f.data.url && f.data.missing);
+  const hdrByHost = new Map();
+  hdrFindings.forEach((f) => {
+    const url = String(f.data.url || '');
+    const host = parseHost(url) || String(f.target || '');
+    const missing = String(f.data.missing || '');
+    if (!host || !missing) return;
+    if (!hdrByHost.has(host)) hdrByHost.set(host, new Set());
+    hdrByHost.get(host).add(missing);
+  });
+
+  const missingHeaderCounts = new Map();
+  hdrByHost.forEach((set) => {
+    Array.from(set.values()).forEach((hdr) => {
+      missingHeaderCounts.set(hdr, (missingHeaderCounts.get(hdr) || 0) + 1);
+    });
+  });
+
+  const sortedMissingHeaders = Array.from(missingHeaderCounts.entries())
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  const hardeningHosts = hdrByHost.size;
+
+  const tlsWeak = findings.filter((f) => f.tool === 'sslscan' && f.data && f.data.weak_protocols);
+  const tlsHostsList = uniq(tlsWeak.map((f) => f.target)).filter(Boolean);
+
+  const whatweb = findings.filter((f) => f.tool === 'whatweb' && f.data && f.data.fingerprint);
+  const drupal = [];
+  const servers = [];
+  whatweb.forEach((f) => {
+    const fp = String(f.data.fingerprint || '');
+    const m = fp.match(/Drupal\s+([0-9]+(?:\.[0-9]+)*)/i);
+    if (m && m[1]) drupal.push(m[1]);
+    const m2 = fp.match(/Apache\/([0-9]+(?:\.[0-9]+){1,3})/i);
+    if (m2 && m2[1]) servers.push(`Apache/${m2[1]}`);
+  });
+
+  const ffuf = findings
+    .filter((f) => f.tool === 'ffuf' && f.data && (f.data.url || f.target))
+    .map((f) => ({
+      url: String(f.data.url || f.target || ''),
+      status: f.data && f.data.status !== undefined ? String(f.data.status) : '',
+      len: f.data && f.data.length !== undefined ? String(f.data.length) : ''
+    }))
+    .filter((x) => x.url && !(/#/).test(x.url) && !isProbablyNoiseFfufUrl(x.url));
+
+  const limTimeouts = notes.filter((n) => n.tool === 'runner-timeout');
+  const skippedTools = notes
+    .filter((n) => n && n.data && (n.data.skipped === true || /tool not found/i.test(String((n.data && (n.data.message || n.data.reason)) || ''))))
+    .slice(0, 30);
+  const limitationNotes = [];
+  if (limTimeouts.length) limitationNotes.push(`timeout events (${limTimeouts.length})`);
+  if (skippedTools.length) limitationNotes.push(`${skippedTools.length} optional tools unavailable`);
+
+  let openPortHostCount = Object.keys(openPorts).length;
+  if (openPortHostCount < 0) openPortHostCount = 0;
+
+  const recommendationEntries = [];
+  sortedPotential.slice(0, 5).forEach((f) => {
+    const hosts = gatherHostsFromFinding(f);
+    if (!hosts.length && target) hosts.push(target);
+    const description = describeFinding(f) || f.tool || 'Automated signal';
+    const context = getUrlFromFinding(f) || f.target || '';
+    const summary = `Validate ${description}${context ? ` (${context})` : ''} and apply the appropriate mitigation.`;
+    recommendationEntries.push({
+      priority: severityLabel(f.severity),
+      summary,
+      hosts: formatHostList(hosts, 4)
+    });
+  });
+  if (hdrByHost.size && sortedMissingHeaders.length) {
+    const headerList = sortedMissingHeaders.slice(0, 3)
+      .map(([hdr, count]) => `${hdr} (${count})`)
+      .join(', ');
+    recommendationEntries.push({
+      priority: 'Medium',
+      summary: `Implement missing HTTP security headers (${headerList}) across impacted hosts.`,
+      hosts: formatHostList(Array.from(hdrByHost.keys()), 4)
+    });
+  }
+  if (tlsHostsList.length) {
+    recommendationEntries.push({
+      priority: 'Medium',
+      summary: 'Retire legacy TLS protocols and confirm cipher suites align with current best practices.',
+      hosts: formatHostList(tlsHostsList, 4)
+    });
+  }
+  if (openPortHostCount) {
+    recommendationEntries.push({
+      priority: 'Medium',
+      summary: 'Review open ports and services for unauthorized exposure before progressing deeper.',
+      hosts: formatHostList(Object.keys(openPorts), 4)
+    });
+  }
+  if (!recommendationEntries.length) {
+    recommendationEntries.push({
+      priority: 'Informational',
+      summary: 'Maintain continuous coverage with automated and manual reviews to keep pace with evolving risk.',
+      hosts: formatHostList([target], 1)
+    });
   }
 
-  const topFindings = [...findings]
-    .sort((a, b) => sevRank(b.severity) - sevRank(a.severity))
-    .slice(0, 40)
-    .map((f) => {
-      const what = f.tool === 'security-headers'
-        ? `missing ${escapeHtml(f.data && f.data.missing)}`
-        : escapeHtml(f.data ? JSON.stringify(f.data).slice(0, 120) : '');
-      const ev = Array.isArray(f.evidence) && f.evidence.length ? escapeHtml(String(f.evidence[0])) : '';
-      return [badge(f.severity), `<code>${escapeHtml(f.tool)}</code>`, `<code>${escapeHtml(f.target)}</code>`, what, `<span class="muted">${ev}</span>`];
-    });
-
-  const secHdrRows = Array.from(byMissing.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 12)
-    .map(([k, v]) => [`<code>${escapeHtml(k)}</code>`, `<b>${v}</b>`]);
+  const runFolderRel = toPosixPath(path.relative(process.cwd(), rootOut));
+  const appendixRunPath = runFolderRel || `data/runs/${runTs}`;
+  const reportFolderRel = `data/reports/${runTs}`;
 
   const summaryCards = `
-  <div class="grid">
-    <div class="card"><div class="k">Target</div><div class="v">${escapeHtml(target)}</div></div>
-    <div class="card"><div class="k">Run</div><div class="v"><code>${escapeHtml(runTs)}</code></div></div>
-    <div class="card"><div class="k">Records</div><div class="v">${counts.total}</div><div class="s">assets ${counts.assets} · findings ${counts.findings} · notes ${counts.notes}</div></div>
-    <div class="card"><div class="k">Subdomains</div><div class="v">${subdomains.length}</div><div class="s">discovered in recon</div></div>
-    <div class="card"><div class="k">Missing sec headers</div><div class="v">${secHdr.length}</div><div class="s">HSTS/CSP/etc</div></div>
-    <div class="card"><div class="k">Weak TLS flags</div><div class="v">${sslWeak.length}</div><div class="s">sslscan heuristic</div></div>
+  <div class="summary-grid">
+    <div class="summary-card highlight">
+      <div class="label">Target</div>
+      <div class="value">${escapeHtml(target)}</div>
+      <div class="sm">Run ${escapeHtml(runTs)}</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Records</div>
+      <div class="value">${counts.total}</div>
+      <div class="sm">assets ${counts.assets} · findings ${counts.findings} · notes ${counts.notes}</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Potential vulnerabilities</div>
+      <div class="value">${totalPotential}</div>
+      <div class="sm">${severitySummary.length ? escapeHtml(severitySummary.join(' · ')) : 'none flagged'}</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Subdomains</div>
+      <div class="value">${hostnames.length}</div>
+      <div class="sm">discovered via recon</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Missing security headers</div>
+      <div class="value">${hardeningHosts}</div>
+      <div class="sm">unique hosts</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Legacy TLS signals</div>
+      <div class="value">${tlsHostsList.length}</div>
+      <div class="sm">sampled endpoints</div>
+    </div>
   </div>`;
 
-  const subdomainSample = subdomains.slice(0, 20).map((s) => `<code>${escapeHtml(s)}</code>`).join(' ');
+  const execPoints = [];
+  execPoints.push(totalPotential
+    ? `Potential vulnerabilities flagged: ${severitySummary.join(', ')}.`
+    : 'No potential vulnerabilities were flagged by the enabled templates.');
+  execPoints.push(hardeningHosts || tlsHostsList.length
+    ? `Configuration reviews highlighted ${hardeningHosts} host(s) missing HTTP security headers and ${tlsHostsList.length} host(s) still allowing legacy TLS.`
+    : 'Configuration posture remains consistent across the scanned hosts.');
+  execPoints.push(hostnames.length || ips.length || openPortHostCount
+    ? `Attack surface mapping captured ${hostnames.length} subdomain(s), ${ips.length} IP address(es), and ${openPortHostCount} host(s) with recorded open ports.`
+    : 'Attack surface enumeration did not expand the scoped hosts.');
+  execPoints.push(limitationNotes.length
+    ? `Limitations include ${limitationNotes.join('; ')}.`
+    : 'All enabled skills completed within their configured timeouts and scopes.');
+
+  const execSummary = execPoints.map((item) => `<p>${escapeHtml(item)}</p>`).join('');
+
+  const samplePotential = capList(sortedPotential, 15);
+  const potentialRows = samplePotential.list.map((f) => {
+    const targetCell = getUrlFromFinding(f) || f.target || 'scoped target';
+    const detail = describeFinding(f) || (f.data ? (f.data['template-id'] || f.data.name || JSON.stringify(f.data).slice(0, 120)) : '');
+    return [
+      badge(f.severity),
+      `<code>${escapeHtml(f.tool)}</code>`,
+      `<code>${escapeHtml(targetCell)}</code>`,
+      escapeHtml(detail)
+    ];
+  });
+  const potentialTable = potentialRows.length
+    ? `${table(['Severity', 'Tool', 'Target', 'Details'], potentialRows, { tableClass: 'data-table' })}${samplePotential.more > 0 ? `<p class="muted table-note">${samplePotential.more} additional findings captured in the run.</p>` : ''}`
+    : '<div class="callout ok"><b>No potential vulnerabilities were flagged</b> by the enabled templates in this run.</div>';
+
+  const recommendationHtml = recommendationEntries.map((rec) => `
+    <div class="recommendation-item">
+      <div class="rec-priority">${escapeHtml(rec.priority)}</div>
+      <div class="rec-summary">${escapeHtml(rec.summary)}</div>
+      ${rec.hosts ? `<div class="rec-hosts">Affected hosts: ${rec.hosts}</div>` : ''}
+    </div>`).join('');
+
+  const headerList = sortedMissingHeaders.slice(0, 4)
+    .map(([hdr, count]) => `<li>${escapeHtml(hdr)} — ${count} host(s)</li>`).join('');
+  const missingHeaderSamples = formatSampleList(Array.from(hdrByHost.keys()), 5);
+  const headerCard = hdrByHost.size
+    ? `<ul class="bullet-list">${headerList}</ul>${missingHeaderSamples ? `<div class="muted small">Sample hosts: ${missingHeaderSamples}</div>` : ''}`
+    : '<div class="callout ok">No missing security headers were detected.</div>';
+  const tlsCard = tlsHostsList.length
+    ? `<div class="callout warn"><b>Legacy TLS detected</b> on ${formatHostList(tlsHostsList, 5)}.</div>`
+    : '<div class="callout ok">TLS configuration is free of legacy protocols.</div>';
+
+  const attackEntries = [];
+  if (hostnames.length) attackEntries.push(`Discovered ${hostnames.length} subdomain(s); sample: ${formatSampleList(hostnames, 6)}.`);
+  else attackEntries.push('Subdomain enumeration did not expand the scoped host list.');
+  if (ips.length) attackEntries.push(`Resolved ${ips.length} IP address(es).`);
+  if (openPortHostCount) {
+    const portSamples = Object.entries(openPorts).slice(0, 4).map(([host, ports]) => {
+      const summary = Array.isArray(ports) ? ports.join(', ') : String(ports);
+      return `Open ports noted on <code>${escapeHtml(host)}</code>: ${escapeHtml(summary)}.`;
+    }).join('<br>');
+    attackEntries.push(portSamples);
+  }
+  if (drupal.length) {
+    attackEntries.push(`CMS fingerprinting captured Drupal versions: ${uniq(drupal).map((v) => `<code>${escapeHtml(v)}</code>`).join(', ')}.`);
+  }
+  if (servers.length) {
+    attackEntries.push(`Web server banners observed: ${uniq(servers).slice(0, 6).map((v) => `<code>${escapeHtml(v)}</code>`).join(', ')}.`);
+  }
+  if (ffuf.length) {
+    const discovered = capList(ffuf, 5);
+    const entries = discovered.list.map((x) => `${escapeHtml(x.url)}${x.status ? ` (status ${escapeHtml(x.status)})` : ''}`);
+    attackEntries.push(`Directory enumeration flagged ${ffuf.length} endpoints; sample: ${entries.join('; ')}.${discovered.more > 0 ? ` +${discovered.more} more` : ''}`);
+  }
+
+  const limitationList = limitationNotes.length
+    ? limitationNotes
+    : ['All enabled tools completed without interruption; scope is limited to the configured skills.'];
 
   return `
-  <div class="header">
-    <div>
-      <div class="title">Security Assessment Report</div>
-      <div class="subtitle">Automated, non-intrusive checks (no exploitation). Generated for triage & hardening.</div>
-    </div>
-    <div class="meta">
-      <div><b>Target:</b> <code>${escapeHtml(target)}</code></div>
-      <div><b>Run:</b> <code>${escapeHtml(runTs)}</code></div>
-    </div>
-  </div>
+  <div class="report-shell">
+    <header class="report-header">
+      <div>
+        <div class="report-title">Security Assessment Report</div>
+        <div class="report-subtitle">Automated, non-intrusive checks (no exploitation). Generated for triage & hardening.</div>
+      </div>
+      <div class="report-meta">
+        <div><span>Target</span><strong>${escapeHtml(target)}</strong></div>
+        <div><span>Run ID</span><strong>${escapeHtml(runTs)}</strong></div>
+      </div>
+    </header>
 
-  ${summaryCards}
+    ${summaryCards}
 
-  <h2>Executive summary</h2>
-  <p>
-    The scan prioritized <b>attack surface mapping</b> and <b>safe configuration checks</b>. Items below are grouped to help you quickly decide
-    what to fix (hardening) and what to validate deeper (potential vulnerabilities).
-  </p>
+    <section class="section">
+      <h2>Executive summary</h2>
+      <div class="section-body">
+        <p>Automated reconnaissance, enumeration, and configuration checks were scoped to the provided target and its resolved assets.</p>
+        <div class="summary-list">
+          ${execSummary}
+        </div>
+      </div>
+    </section>
 
-  <h2>Potential vulnerabilities (if any)</h2>
-  <p class="muted">This section is populated by vulnerability templates/tools (e.g., Nuclei). Hardening signals (headers/TLS) are shown below.</p>
-  ${findings.filter((f) => f.tool === 'nuclei').length
-    ? table(['sev', 'tool', 'target', 'what'], [...findings]
-        .filter((f) => f.tool === 'nuclei')
-        .sort((a,b) => sevRank(b.severity) - sevRank(a.severity))
-        .slice(0, 25)
-        .map((f) => [badge(f.severity), `<code>${escapeHtml(f.tool)}</code>`, `<code>${escapeHtml(f.target)}</code>`, escapeHtml(f.data ? (f.data['template-id'] || f.data.name || JSON.stringify(f.data).slice(0, 140)) : '')]))
-    : '<div class="callout ok"><b>No potential vulnerabilities were flagged</b> by enabled vulnerability templates in this run.</div>'}
+    <section class="section">
+      <h2>Potential vulnerabilities</h2>
+      <p class="muted">This section highlights templates such as Nuclei that surfaced higher-risk findings; refer to the run artifacts for the evidence.</p>
+      ${potentialTable}
+    </section>
 
-  <h2>Hardening opportunities</h2>
-  <div class="two">
-    <div class="card">
-      <div class="k">Missing HTTP security headers (most frequent)</div>
-      ${secHdrRows.length ? table(['header', 'count'], secHdrRows) : '<p class="muted">No missing-header signals captured.</p>'}
-      <div class="small muted">Tip: prioritize HSTS + CSP across public-facing hosts.</div>
-    </div>
-    <div class="card">
-      <div class="k">TLS / SSL</div>
-      ${sslWeak.length
-        ? `<div class="callout warn"><b>Legacy/weak TLS</b> was observed on <b>${sslWeak.length}</b> checks (sampled endpoints).</div>`
-        : '<div class="callout ok"><b>No weak-TLS signals</b> were reported by sslscan in this run.</div>'}
-      <ul>
-        <li>Confirm supported protocols/ciphers and disable legacy versions where possible.</li>
-      </ul>
-    </div>
-  </div>
+    <section class="section">
+      <h2>Recommendations</h2>
+      <div class="recommendations-list">
+        ${recommendationHtml}
+      </div>
+    </section>
 
-  <h2>Attack surface snapshot</h2>
-  <div class="card">
-    <div class="k">Subdomains discovered from site links</div>
-    <div class="s">Total: <b>${subdomains.length}</b> · sample:</div>
-    <div class="chips">${subdomainSample || '<span class="muted">(none)</span>'}</div>
-  </div>
+    <section class="section">
+      <h2>Hardening</h2>
+      <div class="hardening-grid">
+        <div class="hardening-card">
+          <div class="card-title">Security headers</div>
+          ${headerCard}
+        </div>
+        <div class="hardening-card">
+          <div class="card-title">TLS / SSL</div>
+          ${tlsCard}
+        </div>
+      </div>
+    </section>
 
-  <h2>Prioritized findings (compact)</h2>
-  <p class="muted">A compact view of top signals across tools. Detailed evidence remains in the run folder artifacts.</p>
-  ${table(['sev', 'tool', 'target', 'what'], topFindings.map((r) => r.slice(0, 4)))}
+    <section class="section">
+      <h2>Attack surface</h2>
+      <div class="section-body">
+        <ul class="bullet-list">
+          ${attackEntries.map((line) => `<li>${line}</li>`).join('')}
+        </ul>
+      </div>
+    </section>
 
-  <h2>Limitations</h2>
-  <div class="card">
-    <ul>
-      <li>Automated scan only; manual validation is recommended before any conclusions.</li>
-      <li>Some tools may be missing/timeout in the environment; coverage may be partial.</li>
-      <li>Artifacts available in the run folder: <code>report.md</code>, <code>records.jsonl</code>, and <code>evidence/</code>.</li>
-    </ul>
-  </div>
-  `;
+    <section class="section">
+      <h2>Limitations</h2>
+      <div class="callout note">
+        <ul class="bullet-list">
+          ${limitationList.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}
+        </ul>
+      </div>
+    </section>
+
+    <section class="section appendix">
+      <h2>Appendix</h2>
+      <p>Run artifacts reside under <code>${escapeHtml(appendixRunPath)}</code>; the generated report suite is available in <code>${escapeHtml(reportFolderRel)}</code>.</p>
+    </section>
+  </div>`;
 }
 
 function htmlTemplate({ title, bodyHtml }) {
@@ -180,44 +492,237 @@ function htmlTemplate({ title, bodyHtml }) {
   <meta charset="utf-8" />
   <title>${escapeHtml(title)}</title>
   <style>
-    @page { size: A4; margin: 16mm 14mm; }
-    body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; color: #0f172a; }
-
-    .header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:14px; }
-    .title { font-size: 20px; font-weight: 750; letter-spacing: -0.02em; }
-    .subtitle { font-size: 11px; color: #475569; margin-top: 2px; }
-    .meta { font-size: 10px; color: #64748b; text-align:right; max-width: 320px; }
-
-    h2 { font-size: 13px; margin: 16px 0 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
-    p, li { font-size: 10.5px; line-height: 1.4; margin: 0 0 6px; }
-
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; background: #f1f5f9; padding: 1px 4px; border-radius: 4px; }
-    pre { background: #0b1020; color: #e6edf3; padding: 10px; border-radius: 10px; overflow-wrap: anywhere; white-space: pre-wrap; }
-    pre code { background: transparent; color: inherit; padding: 0; }
-
-    .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0 16px; }
-    .two { display:grid; grid-template-columns: 1.1fr 0.9fr; gap: 10px; }
-
-    .card { border:1px solid #e2e8f0; border-radius: 12px; padding: 10px; background: #ffffff; }
-    .k { font-size: 10px; color:#64748b; text-transform: uppercase; letter-spacing: .06em; }
-    .v { font-size: 16px; font-weight: 800; margin-top: 2px; }
-    .s { font-size: 10px; color:#475569; margin-top: 2px; }
-
-    table { width:100%; border-collapse: collapse; font-size: 10px; }
-    th { text-align:left; color:#64748b; font-weight: 700; border-bottom:1px solid #e2e8f0; padding: 6px 6px; }
-    td { border-bottom:1px solid #f1f5f9; padding: 6px 6px; vertical-align: top; }
-    tr:last-child td { border-bottom: 0; }
-
-    .muted { color:#64748b; }
-    .chips { margin-top: 6px; }
-    .chips code { margin-right: 4px; display:inline-block; margin-bottom: 4px; }
-
-    .badge { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; }
-    .badge-info { background:#e0f2fe; color:#075985; }
-    .badge-low { background:#ecfccb; color:#365314; }
-    .badge-med { background:#ffedd5; color:#9a3412; }
-    .badge-high { background:#fee2e2; color:#991b1b; }
-    .badge-crit { background:#0f172a; color:#fff; }
+    @page { size: A4; margin: 18mm 16mm; }
+    :root { color: #0f172a; background: #eef2ff; }
+    body {
+      margin: 0;
+      background: #f1f5f9;
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    }
+    .report-shell {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px;
+      background: #ffffff;
+      border-radius: 24px;
+      box-shadow: 0 15px 40px rgba(15, 23, 42, 0.15);
+      color: #0f172a;
+    }
+    .report-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 12px;
+      border-bottom: 1px solid #e2e8f0;
+      padding-bottom: 12px;
+    }
+    .report-title {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      margin: 0;
+    }
+    .report-subtitle {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #475569;
+    }
+    .report-meta {
+      font-size: 11px;
+      color: #475569;
+      text-align: right;
+    }
+    .report-meta span {
+      display: block;
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #94a3b8;
+    }
+    .report-meta strong {
+      display: block;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .summary-grid {
+      margin-top: 20px;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    }
+    .summary-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      padding: 14px;
+      background: #fff;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+    }
+    .summary-card.highlight {
+      background: linear-gradient(120deg, #0ea5e9, #6366f1);
+      color: #ffffff;
+      box-shadow: 0 14px 30px rgba(15, 23, 42, 0.12);
+    }
+    .summary-card .label {
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: inherit;
+    }
+    .summary-card .value {
+      font-size: 26px;
+      font-weight: 700;
+      margin-top: 4px;
+      color: inherit;
+    }
+    .summary-card .sm {
+      margin-top: 6px;
+      font-size: 11px;
+      color: inherit;
+    }
+    .section {
+      margin-top: 32px;
+    }
+    .section h2 {
+      font-size: 18px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid #e2e8f0;
+      padding-bottom: 6px;
+    }
+    .section-body {
+      font-size: 14px;
+      color: #0f172a;
+      line-height: 1.6;
+    }
+    .summary-list p {
+      margin: 6px 0;
+    }
+    .table-wrapper {
+      margin-top: 12px;
+      border-radius: 16px;
+      border: 1px solid #e2e8f0;
+      overflow: hidden;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 10px 12px;
+    }
+    th {
+      background: #f8fafc;
+      color: #475569;
+      font-weight: 600;
+      text-align: left;
+      letter-spacing: 0.02em;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    td {
+      border-bottom: 1px solid #f1f5f9;
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    .data-table td {
+      font-size: 13px;
+    }
+    .muted {
+      color: #475569;
+      font-size: 12px;
+    }
+    .table-note {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #64748b;
+    }
+    .callout {
+      border-radius: 16px;
+      padding: 14px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      margin: 14px 0;
+    }
+    .callout.note {
+      background: #eef2ff;
+      border-left: 4px solid #2563eb;
+    }
+    .callout.ok {
+      background: #ecfdf5;
+      border-left: 4px solid #15803d;
+    }
+    .callout.warn {
+      background: #fff7ed;
+      border-left: 4px solid #b45309;
+    }
+    .recommendations-list {
+      margin-top: 12px;
+      display: grid;
+      gap: 12px;
+    }
+    .recommendation-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 14px;
+      background: #f8fafc;
+    }
+    .rec-priority {
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #0f172a;
+    }
+    .rec-summary {
+      margin-top: 6px;
+      font-size: 14px;
+      line-height: 1.5;
+      color: #111827;
+    }
+    .rec-hosts {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #475569;
+    }
+    .hardening-grid {
+      margin-top: 12px;
+      display: grid;
+      gap: 18px;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    }
+    .hardening-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      padding: 16px;
+      background: #fff;
+    }
+    .card-title {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin-bottom: 8px;
+    }
+    .bullet-list {
+      padding-left: 20px;
+      margin: 0;
+      list-style-type: disc;
+      color: #0f172a;
+    }
+    .bullet-list li + li {
+      margin-top: 6px;
+    }
+    .appendix p {
+      font-size: 12px;
+      color: #475569;
+      margin: 0;
+    }
+    code {
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      background: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-size: 11px;
+    }
   </style>
 </head>
 <body>

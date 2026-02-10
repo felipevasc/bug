@@ -78,6 +78,30 @@ function describeFinding(f) {
   return '';
 }
 
+function severityLabel(s) {
+  const norm = toSev(s);
+  const labels = {
+    crit: 'Critical',
+    high: 'High',
+    med: 'Medium',
+    low: 'Low',
+    info: 'Informational'
+  };
+  return labels[norm] || 'Informational';
+}
+
+function toPosixPath(p) {
+  return String(p || '').replace(/\\/g, '/');
+}
+
+function formatHostList(arr, limit = 4) {
+  const cleaned = uniq((arr || []).map((v) => String(v || '').trim()).filter(Boolean));
+  if (!cleaned.length) return '';
+  const quoted = cleaned.map((v) => `\`${mdEscape(v)}\``);
+  if (quoted.length <= limit) return quoted.join(', ');
+  return `${quoted.slice(0, limit).join(', ')} (+${quoted.length - limit} more)`;
+}
+
 function getUrlFromFinding(f) {
   if (!f || !f.data) return '';
   return String(f.data.url || f.data.effective_url || '');
@@ -91,6 +115,17 @@ function parseHost(u) {
   } catch (_e) {
     return '';
   }
+}
+
+function gatherHostsFromFinding(f) {
+  const hosts = [];
+  if (f && f.target) hosts.push(String(f.target));
+  const url = getUrlFromFinding(f);
+  if (url) {
+    const parsed = parseHost(url);
+    if (parsed) hosts.push(parsed);
+  }
+  return uniq(hosts).filter(Boolean);
 }
 
 function isProbablyNoiseFfufUrl(u) {
@@ -216,13 +251,6 @@ async function run({ target, emit, outDir, runTs }) {
     .filter((n) => n && n.data && (n.data.skipped === true || /tool not found/i.test(String((n.data && (n.data.message || n.data.reason)) || ''))))
     .slice(0, 30);
 
-  // --- Build markdown ---
-  const lines = [];
-  lines.push(`# Security Assessment Report — ${mdEscape(target)}`);
-  lines.push('');
-  lines.push(`**Run ID:** \`${mdEscape(reportTs)}\``);
-  lines.push('');
-
   const summarySevCounts = countBy(potentialVuln, (r) => toSev(r.severity));
   const totalPotential = potentialVuln.length;
   const severityOrder = ['crit', 'high', 'med', 'low', 'info'];
@@ -240,102 +268,155 @@ async function run({ target, emit, outDir, runTs }) {
   if (timeouts.length) limitationNotes.push(`timeout events (${timeouts.length})`);
   if (skippedTools.length) limitationNotes.push(`${skippedTools.length} optional tools unavailable`);
 
+  const sortedPotential = [...potentialVuln].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  const recommendationEntries = [];
+  sortedPotential.slice(0, 6).forEach((f) => {
+    const hosts = gatherHostsFromFinding(f);
+    if (!hosts.length && target) hosts.push(target);
+    const description = describeFinding(f) || f.tool || 'Automated signal';
+    const context = getUrlFromFinding(f) || f.target || '';
+    const summary = `Validate ${description}${context ? ` (${context})` : ''} and apply the appropriate mitigation.`;
+    recommendationEntries.push({
+      priority: severityLabel(f.severity),
+      summary,
+      hosts: formatHostList(hosts, 4)
+    });
+  });
+
+  if (hdrByHost.size && sortedMissingHeaders.length) {
+    const headerList = sortedMissingHeaders.slice(0, 3)
+      .map(([hdr, count]) => `${hdr} (${count})`)
+      .join(', ');
+    recommendationEntries.push({
+      priority: 'Medium',
+      summary: `Implement missing HTTP security headers (${headerList}) across impacted hosts.`,
+      hosts: formatHostList(Array.from(hdrByHost.keys()), 4)
+    });
+  }
+  if (tlsHostsList.length) {
+    recommendationEntries.push({
+      priority: 'Medium',
+      summary: 'Retire legacy TLS protocols and confirm cipher suites align with current best practices.',
+      hosts: formatHostList(tlsHostsList, 4)
+    });
+  }
+  if (openPortHostCount) {
+    recommendationEntries.push({
+      priority: 'Medium',
+      summary: 'Review open ports and services for unauthorized exposure before progressing deeper.',
+      hosts: formatHostList(Object.keys(openPorts), 4)
+    });
+  }
+  if (!recommendationEntries.length) {
+    recommendationEntries.push({
+      priority: 'Info',
+      summary: 'Maintain continuous coverage with automated and manual reviews to keep pace with evolving risk.',
+      hosts: formatHostList([target], 1)
+    });
+  }
+
+  const runFolderRel = toPosixPath(path.relative(process.cwd(), rootOut));
+  const reportRelPath = toPosixPath(path.relative(process.cwd(), reportPath));
+  const recordsRelPath = toPosixPath(path.relative(process.cwd(), recordsPath));
+  const appendixRunPath = runFolderRel || `data/runs/${reportTs}`;
+
+  const lines = [];
+  lines.push(`# Security Assessment Report — ${mdEscape(target)}`);
+  lines.push('');
+  lines.push(`**Run ID:** \`${mdEscape(reportTs)}\``);
+  lines.push('');
+
   lines.push('## Executive summary');
   lines.push('');
-  if (totalPotential) {
-    lines.push(`- Potential vulnerabilities flagged: ${severitySummary.join(', ')}.`);
-  } else {
-    lines.push('- Potential vulnerabilities: none flagged by the automated templates enabled in this run.');
-  }
-  if (hardeningHosts || tlsHostsList.length) {
-    const hardeningParts = [];
-    if (hardeningHosts) hardeningParts.push(`${hardeningHosts} host(s) missing expected headers`);
-    if (tlsHostsList.length) hardeningParts.push(`${tlsHostsList.length} host(s) still allowing legacy TLS`);
-    lines.push(`- Hardening opportunities: ${hardeningParts.join('; ')}.`);
-  } else {
-    lines.push('- Hardening posture: the automated configuration checks did not surface deviations beyond the scoped targets.');
-  }
-  if (attackHosts || attackIps || openPortHostCount) {
-    lines.push(`- Attack surface: enumerated ${attackHosts} subdomain(s) and ${attackIps} IP address(es); ${openPortHostCount} host(s) reported open ports.`);
-  } else {
-    lines.push('- Attack surface: no additional hosts or ports were discovered beyond the scoped entry points.');
-  }
-  if (limitationNotes.length) {
-    lines.push(`- Limitations: ${limitationNotes.join('; ')}; refer to the run folder for details.`);
-  } else {
-    lines.push('- Limitations: coverage is limited to the automated skills in this pipeline; follow-up validation is recommended.');
-  }
+  lines.push('Automated reconnaissance, enumeration, and configuration checks were scoped to the provided target and its resolved assets.');
+  lines.push(totalPotential
+    ? `Potential vulnerabilities flagged: ${severitySummary.join(', ')}.`
+    : 'No potential vulnerabilities were flagged by the templates enabled for this run.');
+  lines.push(hardeningHosts || tlsHostsList.length
+    ? `Configuration reviews highlighted ${hardeningHosts} host(s) missing HTTP security headers and ${tlsHostsList.length} host(s) still allowing legacy TLS.`
+    : 'Configuration posture remains consistent with expectations across the scanned hosts.');
+  lines.push(attackHosts || attackIps || openPortHostCount
+    ? `Attack surface mapping captured ${attackHosts} subdomain(s), ${attackIps} IP address(es), and ${openPortHostCount} host(s) with recorded open ports.`
+    : 'Attack surface enumeration did not expand beyond the scoped entry points in this run.');
+  lines.push(limitationNotes.length
+    ? `Limitations include ${limitationNotes.join('; ')}; consult the associated run artifacts for full detail.`
+    : 'All enabled skills completed without timeouts or skips; coverage remains confined to the configured pipeline.');
   lines.push('');
 
   lines.push('## Potential vulnerabilities');
   lines.push('');
   if (!totalPotential) {
-    lines.push('_No potential vulnerabilities were captured by the vulnerability templates enabled in this run._');
+    lines.push('_No potential vulnerabilities were captured by the enabled templates in this run._');
   } else {
-    const sortedPotential = [...potentialVuln].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
-    const sampleVulns = capList(sortedPotential, 12);
+    const sampleVulns = capList(sortedPotential, 10);
     sampleVulns.list.forEach((f) => {
       const url = getUrlFromFinding(f);
-      const context = url ? mdEscape(url) : `target ${mdEscape(f.target)}`;
+      const context = url ? `\`${mdEscape(url)}\`` : (f.target ? `target \`${mdEscape(f.target)}\`` : 'scoped target');
       const detail = describeFinding(f);
-      lines.push(`- **${mdEscape(f.severity)}** ${mdEscape(f.tool)} (${context})${detail ? ` — ${mdEscape(detail)}` : ''}`);
+      lines.push(`- **${severityLabel(f.severity)}** ${mdEscape(f.tool)} on ${context}${detail ? ` — ${mdEscape(detail)}` : ''}`);
     });
     if (sampleVulns.more > 0) {
-      lines.push(`- _(plus ${sampleVulns.more} additional items captured in the run)_`);
+      lines.push(`- _(${sampleVulns.more} additional findings captured in the run.)_`);
     }
   }
   lines.push('');
 
-  lines.push('## Hardening & configuration');
+  lines.push('## Recommendations');
   lines.push('');
-  if (hdrByHost.size === 0 && tlsHostsList.length === 0) {
-    lines.push('_No configuration gaps were identified by the security headers or TLS checks._');
+  recommendationEntries.forEach((rec) => {
+    const hostNote = rec.hosts ? ` (Affected hosts: ${rec.hosts})` : '';
+    lines.push(`- **${mdEscape(rec.priority)}** ${mdEscape(rec.summary)}${hostNote}`);
+  });
+  lines.push('');
+
+  lines.push('## Hardening');
+  lines.push('');
+  if (!hdrByHost.size && !tlsHostsList.length) {
+    lines.push('_No configuration gaps were surfaced by the security header or TLS checks._');
   } else {
-    if (sortedMissingHeaders.length) {
+    if (hdrByHost.size) {
       const headerSummary = sortedMissingHeaders.slice(0, 4)
         .map(([hdr, count]) => `${mdEscape(hdr)} (${count} host${count === 1 ? '' : 's'})`)
         .join(', ');
-      lines.push(`- Missing HTTP headers observed on ${hardeningHosts} host(s); top offenders: ${headerSummary}.`);
+      lines.push(`- Missing HTTP headers were detected on ${hardeningHosts} host(s); top offenders: ${headerSummary}.`);
       const headerSamples = formatSampleList(Array.from(hdrByHost.keys()), 6);
-      if (headerSamples) {
-        lines.push(`  - Sample hosts: ${headerSamples}.`);
-      }
+      if (headerSamples) lines.push(`  - Sample hosts: ${headerSamples}.`);
     }
     if (tlsHostsList.length) {
-      lines.push(`- Legacy TLS protocols detected on ${tlsHostsList.length} host(s); sample: ${formatSampleList(tlsHostsList, 5)}.`);
+      lines.push(`- Legacy TLS protocols remain enabled on ${tlsHostsList.length} host(s); sample: ${formatSampleList(tlsHostsList, 5)}.`);
     }
   }
   lines.push('');
 
-  lines.push('## Attack surface & discovery');
+  lines.push('## Attack surface');
   lines.push('');
   if (hostnames.length) {
     lines.push(`- Discovered ${hostnames.length} subdomain(s); sample: ${formatSampleList(hostnames, 6)}.`);
   } else {
-    lines.push('- Subdomain enumeration produced no additional hosts beyond the scoped entry points.');
+    lines.push('- Subdomain enumeration did not expand the scoped host list.');
   }
   if (ips.length) {
     lines.push(`- Resolved ${ips.length} IP address(es).`);
   }
   if (openPortHostCount) {
-    const samples = Object.entries(openPorts).slice(0, 6);
-    samples.forEach(([host, ports]) => {
-      const portList = Array.isArray(ports) ? ports.join(', ') : mdEscape(String(ports));
-      lines.push(`- Open ports reported on \`${mdEscape(host)}\`: ${portList}.`);
+    const portSamples = Object.entries(openPorts).slice(0, 5);
+    portSamples.forEach(([host, ports]) => {
+      const portSnapshot = Array.isArray(ports) ? ports.join(', ') : String(ports);
+      lines.push(`- Open ports noted on \`${mdEscape(host)}\`: ${mdEscape(portSnapshot)}.`);
     });
   }
   if (drupal.length) {
-    lines.push(`- CMS fingerprinting noted Drupal ${uniq(drupal).map((v) => `\`${mdEscape(v)}\``).join(', ')}.`);
+    lines.push(`- CMS fingerprinting captured Drupal versions: ${uniq(drupal).map((v) => `\`${mdEscape(v)}\``).join(', ')}.`);
   }
   if (servers.length) {
     lines.push(`- Web server banners observed: ${uniq(servers).slice(0, 6).map((v) => `\`${mdEscape(v)}\``).join(', ')}.`);
   }
   if (ffuf.length) {
-    const discovered = capList(ffuf, 8);
+    const discovered = capList(ffuf, 6);
     const entries = discovered.list.map((x) => `${mdEscape(x.url)}${x.status ? ` (status ${mdEscape(x.status)})` : ''}`);
     lines.push(`- Directory enumeration flagged ${ffuf.length} endpoints; sample: ${entries.join('; ')}.`);
     if (discovered.more > 0) {
-      lines.push(`- _(plus ${discovered.more} additional endpoints captured)_`);
+      lines.push(`- _(${discovered.more} additional endpoints captured.)_`);
     }
   } else {
     lines.push('- Directory enumeration did not surface high-signal endpoints in this run.');
@@ -345,18 +426,18 @@ async function run({ target, emit, outDir, runTs }) {
   lines.push('## Limitations');
   lines.push('');
   if (!limitationNotes.length) {
-    lines.push('_All enabled tools completed without timeouts or skips; scope is limited to the configured skills._');
+    lines.push('_All enabled tools finished without interruption; scope remains tied to the configured pipeline skills._');
   } else {
     limitationNotes.forEach((note) => {
       lines.push(`- ${note}.`);
     });
   }
-  lines.push('- Raw evidence remains in the corresponding run folder; this summary highlights the most actionable signals only.');
+  lines.push('- Records and evidence persist in the associated run artifacts for further review.');
   lines.push('');
 
   lines.push('## Appendix');
   lines.push('');
-  lines.push(`- Generated artifacts for run \`${mdEscape(reportTs)}\` (records, evidence, etc.) are available in that run's folder for deeper review.`);
+  lines.push(`- Run artifacts are maintained under \`${mdEscape(appendixRunPath)}\`; the generated report (markdown, HTML, PDF) lives under \`${mdEscape(reportRelPath)}\` and records under \`${mdEscape(recordsRelPath)}\`.`);
   lines.push('');
 
   fs.writeFileSync(reportPath, `${lines.join('\n')}\n`);
@@ -368,7 +449,7 @@ async function run({ target, emit, outDir, runTs }) {
     target,
     severity: 'info',
     evidence: [reportPath, recordsPath],
-    data: { report: reportPath, records: recordsPath },
+    data: { report: reportRelPath, records: recordsRelPath, run: appendixRunPath },
     source: SOURCE
   });
 }
