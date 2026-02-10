@@ -81,7 +81,16 @@ EV_DIR="${ROOT_OUT}/evidence/enum/nuclei"
 mkdir -p "$EV_DIR"
 
 RATE="${RATE:-2}"
-TIMEOUT="${TIMEOUT:-60}"
+# TIMEOUT is treated as *overall runtime budget* (seconds) for the skill.
+# Nuclei's per-request timeout should be much smaller; otherwise it can appear to hang.
+RUN_TIMEOUT="${TIMEOUT:-60}"
+REQ_TIMEOUT="${NUCLEI_REQ_TIMEOUT:-20}"
+# Keep req timeout sane relative to run timeout.
+if [[ "$RUN_TIMEOUT" =~ ^[0-9]+$ ]]; then
+  if [[ "$REQ_TIMEOUT" =~ ^[0-9]+$ && "$REQ_TIMEOUT" -gt "$RUN_TIMEOUT" ]]; then
+    REQ_TIMEOUT="$RUN_TIMEOUT"
+  fi
+fi
 
 emit_note() {
   local tool="$1"; shift
@@ -182,15 +191,15 @@ out_jsonl="${EV_DIR}/${TARGET}.nuclei.jsonl"
 # -timeout : per request timeout
 # -severity: we keep all, but can filter later
 # templates: focus on misconfig/exposures/headers/cves
-emit_note "nuclei" "info" "running nuclei on ${cnt} urls (rate=${RATE}, timeout=${TIMEOUT})"
+emit_note "nuclei" "info" "running nuclei on ${cnt} urls (rate=${RATE}, run_timeout=${RUN_TIMEOUT}, req_timeout=${REQ_TIMEOUT})"
 
 # Note: templates location is managed by nuclei itself (templates installed under ~/.local/nuclei-templates).
 # Use tags/categories to keep it safe.
-cat "$urls_txt" | timeout "${TIMEOUT}s" nuclei \
+cat "$urls_txt" | timeout "${RUN_TIMEOUT}s" nuclei \
   -silent \
   -jsonl \
   -rl "$RATE" \
-  -timeout "$TIMEOUT" \
+  -timeout "$REQ_TIMEOUT" \
   -tags misconfig,exposure,exposures,headers,cve \
   -severity info,low,medium,high,critical \
   2>"${EV_DIR}/${TARGET}.nuclei.stderr.txt" \
