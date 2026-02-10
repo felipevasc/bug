@@ -196,28 +196,36 @@ async function run({ target, emit, outDir, runTs }) {
   lines.push(`**Run ID:** \`${mdEscape(reportTs)}\``);
   lines.push('');
 
-  // Executive summary (keep it short and decision-oriented)
-  const critN = sevCounts.get('crit') || 0;
-  const highN = sevCounts.get('high') || 0;
-  const medN = sevCounts.get('med') || 0;
-  const lowN = sevCounts.get('low') || 0;
+  // Executive summary (decision-oriented)
+  const vulnSevCounts = countBy(potentialVuln, (r) => toSev(r.severity));
+  const vCrit = vulnSevCounts.get('crit') || 0;
+  const vHigh = vulnSevCounts.get('high') || 0;
+  const vMed = vulnSevCounts.get('med') || 0;
+  const vLow = vulnSevCounts.get('low') || 0;
+
+  const hardeningHosts = hdrByHost.size;
+  const tlsHosts = uniq(tlsWeak.map((f) => f.target)).length;
 
   lines.push('## Executive summary');
   lines.push('');
-  if (critN + highN + medN === 0) {
-    lines.push('- No **high/critical** vulnerabilities were identified by the automated checks in this run.');
+  if ((vCrit + vHigh + vMed + vLow) === 0) {
+    lines.push('- **Potential vulnerabilities:** none were flagged by the enabled vulnerability templates in this run.');
   } else {
-    lines.push(`- **Action required:** ${critN} critical, ${highN} high, ${medN} medium item(s) detected.`);
+    lines.push(`- **Potential vulnerabilities flagged:** ${vCrit} critical, ${vHigh} high, ${vMed} medium, ${vLow} low.`);
   }
-  if (lowN > 0) lines.push(`- ${lowN} low-severity items were identified (mostly hardening / configuration hygiene).`);
-  lines.push('- This report focuses on **actionable security insights** (not raw tool logs).');
+  if (hardeningHosts || tlsHosts) {
+    lines.push(`- **Hardening opportunities:** missing security headers observed on **${hardeningHosts} host(s)**; weak/legacy TLS observed on **${tlsHosts} host(s)**.`);
+  }
+  lines.push('- This report is intentionally **not a raw log**. It highlights what matters for triage and remediation.');
   lines.push('');
 
-  lines.push('## Findings summary');
+  lines.push('## Summary (by category)');
   lines.push('');
-  lines.push('| Severity | Count |');
-  lines.push('|---|---:|');
-  ['crit', 'high', 'med', 'low', 'info'].forEach((s) => lines.push(`| ${s} | ${sevCounts.get(s) || 0} |`));
+  lines.push('| Category | What it means | Count |');
+  lines.push('|---|---|---:|');
+  lines.push(`| Potential vulnerabilities | Items that may represent exploitable issues (templates/tools) | ${potentialVuln.length} |`);
+  lines.push(`| Hardening / configuration | Security posture gaps (headers, TLS, etc.) | ${hdrFindings.length + tlsWeak.length} |`);
+  lines.push(`| Discovery | Interesting endpoints / paths for follow-up | ${ffuf.length} |`);
   lines.push('');
 
   lines.push('## Attack surface snapshot');
@@ -262,12 +270,28 @@ async function run({ target, emit, outDir, runTs }) {
     if (hdrByHost.size) {
       lines.push('### Missing HTTP security headers');
       lines.push('');
-      Array.from(hdrByHost.entries())
+      // Show prevalence first, then list affected hosts (capped)
+      const missingCounts = new Map();
+      Array.from(hdrByHost.values()).forEach((set) => {
+        Array.from(set.values()).forEach((h) => missingCounts.set(h, (missingCounts.get(h) || 0) + 1));
+      });
+
+      lines.push('**Most common missing headers (across hosts):**');
+      Array.from(missingCounts.entries())
+        .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+        .slice(0, 10)
+        .forEach(([hdr, c]) => lines.push(`- ${mdEscape(hdr)}: ${c} host(s)`));
+      lines.push('');
+
+      lines.push('**Affected hosts (sample):**');
+      const affected = Array.from(hdrByHost.entries())
         .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-        .forEach(([host, set]) => {
-          const missing = Array.from(set.values()).sort();
-          lines.push(`- \`${mdEscape(host)}\`: ${missing.map((x) => `**${mdEscape(x)}**`).join(', ')}`);
-        });
+        .map(([host, set]) => ({ host, missing: Array.from(set.values()).sort() }));
+      const capped = capList(affected, 12);
+      capped.list.forEach((x) => {
+        lines.push(`- \`${mdEscape(x.host)}\`: ${x.missing.slice(0, 6).map((h) => `**${mdEscape(h)}**`).join(', ')}${x.missing.length > 6 ? ' …' : ''}`);
+      });
+      if (capped.more > 0) lines.push(`- _(plus ${capped.more} more hosts)_`);
       lines.push('');
     }
 
