@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { normalizeRecord } = require('./schema');
+const { parseTarget } = require('./targets');
 
 function nowIso() {
   return new Date().toISOString();
@@ -36,6 +37,15 @@ function parseCommonArgs(argv) {
     if (k === '--timeout' && v) { args.timeout = v; i += 1; continue; }
     if (k === '--allow-exploit') { args.allowExploit = true; continue; }
   }
+
+  // Accept URL values in --target and normalize to host (+ optional url).
+  if (args.target) {
+    const info = parseTarget(args.target);
+    args.targetInput = args.target;
+    if (info.host) args.target = info.host;
+    if (!args.url && info.kind === 'url' && info.url) args.url = info.url;
+  }
+
   return args;
 }
 
