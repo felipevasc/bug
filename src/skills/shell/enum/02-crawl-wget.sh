@@ -364,6 +364,36 @@ fi
 internal_count="$(wc -l <"$URLS_INTERNAL" | tr -d ' ')"
 external_count="$(wc -l <"$URLS_EXTERNAL" | tr -d ' ')"
 
+# Extract subdomains/hosts found in internal URLs and emit as an asset so the runner can propagate them.
+HOSTS_TXT="${OUT_SUBDIR}/hosts_internal.txt"
+python3 - "$TARGET" <"$URLS_INTERNAL" >"$HOSTS_TXT" <<'PY'
+import sys
+from urllib.parse import urlsplit
+root = (sys.argv[1] or '').strip().lower().rstrip('.')
+hosts=set()
+for line in sys.stdin:
+  s=line.strip()
+  if not s: continue
+  try:
+    sp=urlsplit(s)
+  except Exception:
+    continue
+  h=(sp.hostname or '').lower().rstrip('.')
+  if not h: continue
+  if h==root or h.endswith('.'+root):
+    hosts.add(h)
+for h in sorted(hosts):
+  print(h)
+PY
+hosts_count="$(wc -l <"$HOSTS_TXT" | tr -d ' ')"
+
+printf '{"type":"asset","tool":"subdomains","stage":"enum","target":"%s","ts":"%s","timestamp":"%s","severity":"info","evidence":["%s"],"data":{"hostnames":%s,"source":"crawl-wget","urls_internal":%s},"source":"src/skills/shell/enum/02-crawl-wget.sh"}\n' \
+  "$TARGET" "$TS" "$TIMESTAMP" \
+  "$HOSTS_TXT" \
+  "$(python3 -c 'import json,sys; print(json.dumps([ln.strip() for ln in open(sys.argv[1],encoding="utf-8",errors="ignore").read().splitlines() if ln.strip()]))' "$HOSTS_TXT")" \
+  "$internal_count" \
+  > /dev/stdout
+
 if [[ "$UPDATE_WORDLISTS" == "1" ]]; then
   WL_PATHS="wordlists/custom/paths.txt"
   WL_API="wordlists/custom/api_endpoints.txt"
