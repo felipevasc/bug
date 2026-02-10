@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
 const { normalizeRecord } = require('../lib/schema');
@@ -141,6 +141,37 @@ function nowStamp() {
   return `${yyyy}${mm}${dd}T${hh}${mi}${ss}Z`;
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeSpawnSync(cmd, argv, opts = {}) {
+  try {
+    return spawnSync(cmd, argv, { encoding: 'utf8', ...opts });
+  } catch (_err) {
+    return { status: 127, stdout: '', stderr: '' };
+  }
+}
+
+function bestEffortGitInfo() {
+  const resCommit = safeSpawnSync('git', ['rev-parse', 'HEAD']);
+  const commit = resCommit && resCommit.status === 0 ? String(resCommit.stdout || '').trim() : null;
+
+  const resStatus = safeSpawnSync('git', ['status', '--porcelain']);
+  const dirty = resStatus && resStatus.status === 0 ? String(resStatus.stdout || '').trim().length > 0 : null;
+
+  return { commit, dirty };
+}
+
+function bestEffortPythonVersion() {
+  // Some python versions print to stderr.
+  const res = safeSpawnSync('python3', ['--version']);
+  const raw = String((res && (res.stdout || res.stderr)) || '').trim();
+  const m = raw.match(/Python\s+([0-9]+(?:\.[0-9]+){1,3})/);
+  if (m && m[1]) return m[1];
+  return raw || null;
+}
+
 function readJsonlLines(chunk, buffer) {
   const data = buffer + chunk;
   const lines = data.split('\n');
@@ -163,7 +194,7 @@ async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
   const run = mod && mod.run;
   if (typeof run !== 'function') {
     process.stderr.write(`[runner] node skill has no exported run(): ${skillPath}\n`);
-    return { ok: false, code: 1, emitted: 0, parseErrors: 0, stderr: 'missing_run' };
+    return { ok: false, code: 1, emitted: 0, parseErrors: 0, stderr: 'missing_run', timedOut: false };
   }
 
   const targetHost = targetInfo.host || '';
@@ -225,13 +256,14 @@ async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
       await runPromise;
     }
 
-    return { ok: true, code: 0, emitted, parseErrors: 0, stderr: '' };
+    return { ok: true, code: 0, emitted, parseErrors: 0, stderr: '', timedOut: false };
   } catch (err) {
     acceptEmits = false;
     const msg = err && err.stack ? err.stack : String(err);
     process.stderr.write(`[runner] node skill failed: ${skillPath}: ${msg}\n`);
 
-    if (String(msg).includes('runner-timeout:')) {
+    const timedOut = String(msg).includes('runner-timeout:');
+    if (timedOut) {
       const t = Number(opts.timeout || process.env.TIMEOUT || 0);
       const record = buildPayload({
         type: 'note',
@@ -246,10 +278,11 @@ async function runNodeSkillInProcess(skillPath, targetInfo, opts) {
       });
       process.stdout.write(`${JSON.stringify(record)}\n`);
       safeWrite(opts.recordsStream, `${JSON.stringify(record)}\n`);
+      if (typeof opts.onRecord === 'function') opts.onRecord(record);
       if (!opts.dryRun) void ingestRecord(record);
     }
 
-    return { ok: false, code: 1, emitted, parseErrors: 0, stderr: msg };
+    return { ok: false, code: 1, emitted, parseErrors: 0, stderr: msg, timedOut };
   } finally {
     acceptEmits = false;
     if (typeof prevTargetHost === 'undefined') delete process.env.TARGET_HOST;
@@ -383,8 +416,9 @@ async function runSkillOnce(skillPath, targetInfo, opts) {
     });
     process.stdout.write(`${JSON.stringify(record)}\n`);
     if (opts.recordsStream) opts.recordsStream.write(`${JSON.stringify(record)}\n`);
+    if (typeof opts.onRecord === 'function') opts.onRecord(record);
     if (!opts.dryRun) void ingestRecord(record);
-    return { ok: false, code: code || 124, emitted, parseErrors, stderr: (errBuf || 'timeout') };
+    return { ok: false, code: code || 124, emitted, parseErrors, stderr: (errBuf || 'timeout'), timedOut: true };
   }
 
   if (outBuf.trim().length > 0) {
@@ -413,7 +447,7 @@ async function runSkillOnce(skillPath, targetInfo, opts) {
     }
   }
 
-  return { ok: code === 0, code, emitted, parseErrors, stderr: errBuf };
+  return { ok: code === 0, code, emitted, parseErrors, stderr: errBuf, timedOut: false };
 }
 
 async function main() {
@@ -493,105 +527,224 @@ async function main() {
     process.exit(1);
   }
 
+  let recordsEmitted = 0;
+  let skillsInvoked = 0;
+  let skillFailures = 0;
+  let parseErrorsTotal = 0;
+  let timeoutsTotal = 0;
+  const targetsProcessed = new Set();
+
+  function emitRunnerRecord(record) {
+    const payload = buildPayload(record);
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    recordsStream.write(`${JSON.stringify(payload)}\n`);
+    recordsEmitted += 1;
+    if (!args.dryRun) void ingestRecord(payload);
+    return payload;
+  }
+
+  const runArgs = {
+    argv: process.argv.slice(2),
+    parsed: args
+  };
+
+  const git = bestEffortGitInfo();
+  const versions = {
+    node: process.versions && process.versions.node ? process.versions.node : process.version,
+    python: bestEffortPythonVersion()
+  };
+
   let stageTargets = targetInfos.filter((t) => inScopeOrAllowAll(t));
   const initialFiltered = targetInfos.filter((t) => !inScopeOrAllowAll(t));
   if (initialFiltered.length > 0) {
     process.stderr.write(`[runner] scope blocked ${initialFiltered.length} initial target(s)\n`);
   }
 
-  for (const stage of selectedStages) {
-    if (stage && stage.name === 'exploit') {
-      const okGate = Boolean(args.allowExploit);
-      if (!okGate) {
-        const gateTarget = stageTargets[0] || targetInfos[0] || null;
-        const gateTargetHost = gateTarget ? (gateTarget.host || gateTarget.normalizedTarget || gateTarget.input) : '';
-        const record = buildPayload({
-          type: 'note',
-          tool: 'intrusive-gate',
-          stage: stage.name,
-          target: gateTargetHost,
-          severity: 'info',
-          evidence: [],
-          data: { intrusive_actions: 'blocked', required: '--allow-exploit' },
-          source: 'src/bin/run-pipeline.js',
-          workspace: args.workspace
-        });
-        process.stdout.write(`${JSON.stringify(record)}\n`);
-        recordsStream.write(`${JSON.stringify(record)}\n`);
-        if (!args.dryRun) void ingestRecord(record);
-        process.stderr.write('[runner] exploit stage blocked (missing --allow-exploit)\n');
-        continue;
+  const plannedTargets = stageTargets.length;
+  const plannedStages = selectedStages.length;
+  const plannedSkills = selectedStages.reduce((sum, st) => {
+    if (!st || !Array.isArray(st.skills)) return sum;
+    if (st.name === 'exploit' && !args.allowExploit) return sum;
+    return sum + (st.skills.length * plannedTargets);
+  }, 0);
+
+  emitRunnerRecord({
+    type: 'note',
+    tool: 'runner-envelope',
+    stage: 'meta',
+    target: '',
+    severity: 'info',
+    evidence: [],
+    ts: nowIso(),
+    data: {
+      event: 'run_start',
+      run_ts: runTs,
+      out_dir: outDir,
+      pipeline: { path: pipelinePath, definition: pipeline },
+      args: runArgs,
+      git,
+      versions,
+      counts: {
+        targets: plannedTargets,
+        stages: plannedStages,
+        skills: plannedSkills,
+        records_emitted: recordsEmitted + 1
+      },
+      errors: {
+        skill_failures: skillFailures,
+        parse_errors: parseErrorsTotal,
+        timeouts: timeoutsTotal
       }
-    }
+    },
+    source: 'src/bin/run-pipeline.js',
+    workspace: args.workspace
+  });
 
-    const skills = Array.isArray(stage.skills) ? stage.skills : [];
-    const discovered = new Set();
-    const onRecord = (rec) => {
-      extractTargets(rec).forEach((t) => discovered.add(t));
-    };
+  let aborted = false;
+  let abortExitCode = 0;
 
-    for (const skillRef of skills) {
-      const skillPath = path.isAbsolute(skillRef) ? skillRef : path.resolve(pipelineDir, skillRef);
-      for (const target of stageTargets) {
-        process.stderr.write(`[runner] stage=${stage.name} skill=${skillRef} target=${target.normalizedTarget}\n`);
-        // eslint-disable-next-line no-await-in-loop
-        const res = await runSkillOnce(skillPath, target, {
-          dryRun: args.dryRun,
-          strict: args.strict,
-          workspace: args.workspace,
-          sourceFallback: skillRef,
-          stage: stage.name,
-          tool: path.basename(skillRef),
-          onRecord,
-          outDir,
-          scopeFile: args.scopeFile,
-          rate: args.rate,
-          timeout: args.timeout,
-          allowExploit: args.allowExploit,
-          allowVuln: args.allowVuln,
-          confirm: args.confirm,
-          runTs,
-          recordsStream
+  try {
+    for (const stage of selectedStages) {
+      if (stage && stage.name === 'exploit') {
+        const okGate = Boolean(args.allowExploit);
+        if (!okGate) {
+          const gateTarget = stageTargets[0] || targetInfos[0] || null;
+          const gateTargetHost = gateTarget ? (gateTarget.host || gateTarget.normalizedTarget || gateTarget.input) : '';
+          const record = buildPayload({
+            type: 'note',
+            tool: 'intrusive-gate',
+            stage: stage.name,
+            target: gateTargetHost,
+            severity: 'info',
+            evidence: [],
+            data: { intrusive_actions: 'blocked', required: '--allow-exploit' },
+            source: 'src/bin/run-pipeline.js',
+            workspace: args.workspace
+          });
+          emitRunnerRecord(record);
+          process.stderr.write('[runner] exploit stage blocked (missing --allow-exploit)\n');
+          continue;
+        }
+      }
+
+      const skills = Array.isArray(stage.skills) ? stage.skills : [];
+      const discovered = new Set();
+      const onRecord = (rec) => {
+        recordsEmitted += 1;
+        extractTargets(rec).forEach((t) => discovered.add(t));
+      };
+
+      for (const skillRef of skills) {
+        const skillPath = path.isAbsolute(skillRef) ? skillRef : path.resolve(pipelineDir, skillRef);
+        for (const target of stageTargets) {
+          process.stderr.write(`[runner] stage=${stage.name} skill=${skillRef} target=${target.normalizedTarget}\n`);
+          skillsInvoked += 1;
+          const tk = targetKey(target);
+          if (tk) targetsProcessed.add(tk);
+          // eslint-disable-next-line no-await-in-loop
+          const res = await runSkillOnce(skillPath, target, {
+            dryRun: args.dryRun,
+            strict: args.strict,
+            workspace: args.workspace,
+            sourceFallback: skillRef,
+            stage: stage.name,
+            tool: path.basename(skillRef),
+            onRecord,
+            outDir,
+            scopeFile: args.scopeFile,
+            rate: args.rate,
+            timeout: args.timeout,
+            allowExploit: args.allowExploit,
+            allowVuln: args.allowVuln,
+            confirm: args.confirm,
+            runTs,
+            recordsStream
+          });
+          parseErrorsTotal += Number(res.parseErrors || 0);
+          if (!res.ok) skillFailures += 1;
+          if (res.timedOut) timeoutsTotal += 1;
+          if (!res.ok && pipeline.options && pipeline.options.stop_on_error) {
+            process.stderr.write(`[runner] stopping on error: ${skillRef} (code ${res.code})\n`);
+            aborted = true;
+            abortExitCode = res.code || 1;
+            break;
+          }
+        }
+        if (aborted) break;
+      }
+      if (aborted) break;
+
+      if (propagateAssets && discovered.size > 0) {
+        const next = new Map();
+        const hostSet = new Set();
+        stageTargets.forEach((t) => {
+          next.set(targetKey(t), t);
+          if (t.host) hostSet.add(t.host);
         });
-        if (!res.ok && pipeline.options && pipeline.options.stop_on_error) {
-          process.stderr.write(`[runner] stopping on error: ${skillRef} (code ${res.code})\n`);
-          process.exit(res.code || 1);
+
+        discovered.forEach((raw) => {
+          const info = parseTarget(raw);
+          if (!info.host) return;
+          if (hostSet.has(info.host)) return;
+          if (!inScopeOrAllowAll(info)) return;
+          next.set(targetKey(info), info);
+          hostSet.add(info.host);
+        });
+        stageTargets = Array.from(next.values());
+        stageTargets.sort(compareTargets);
+
+        if (maxTargets > 0 && stageTargets.length > maxTargets) {
+          process.stderr.write(`[runner] max-targets cap: ${stageTargets.length} -> ${maxTargets}\n`);
+          stageTargets = stageTargets.slice(0, maxTargets);
         }
       }
     }
+  } finally {
+    emitRunnerRecord({
+      type: 'note',
+      tool: 'runner-envelope',
+      stage: 'meta',
+      target: '',
+      severity: 'info',
+      evidence: [],
+      ts: nowIso(),
+      data: {
+        event: 'run_end',
+        run_ts: runTs,
+        out_dir: outDir,
+        pipeline: { path: pipelinePath, definition: pipeline },
+        args: runArgs,
+        git,
+        versions,
+        counts: {
+          targets: targetsProcessed.size,
+          stages: plannedStages,
+          skills: skillsInvoked,
+          records_emitted: recordsEmitted + 1
+        },
+        errors: {
+          skill_failures: skillFailures,
+          parse_errors: parseErrorsTotal,
+          timeouts: timeoutsTotal
+        }
+      },
+      source: 'src/bin/run-pipeline.js',
+      workspace: args.workspace
+    });
 
-    if (propagateAssets && discovered.size > 0) {
-      const next = new Map();
-      const hostSet = new Set();
-      stageTargets.forEach((t) => {
-        next.set(targetKey(t), t);
-        if (t.host) hostSet.add(t.host);
-      });
-
-      discovered.forEach((raw) => {
-        const info = parseTarget(raw);
-        if (!info.host) return;
-        if (hostSet.has(info.host)) return;
-        if (!inScopeOrAllowAll(info)) return;
-        next.set(targetKey(info), info);
-        hostSet.add(info.host);
-      });
-      stageTargets = Array.from(next.values());
-      stageTargets.sort(compareTargets);
-
-      if (maxTargets > 0 && stageTargets.length > maxTargets) {
-        process.stderr.write(`[runner] max-targets cap: ${stageTargets.length} -> ${maxTargets}\n`);
-        stageTargets = stageTargets.slice(0, maxTargets);
-      }
-    }
+    recordsStream.end();
   }
 
-  recordsStream.end();
+  if (aborted) {
+    process.exitCode = abortExitCode || 1;
+    return;
+  }
+
   process.stderr.write(`[runner] outDir=${outDir}\n`);
   process.stderr.write(`[runner] records=${recordsPath}\n`);
 }
 
 main().catch((err) => {
   process.stderr.write(`[runner] fatal: ${err && err.message ? err.message : String(err)}\n`);
-  process.exit(1);
+  process.exitCode = 1;
 });
