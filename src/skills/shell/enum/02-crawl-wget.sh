@@ -112,6 +112,11 @@ PY
 )"
 TARGET="${norm%%$'\t'*}"
 URL="${norm#*$'\t'}"
+# Defensive trimming (avoid tabs/whitespace leaking into host/url)
+TARGET="${TARGET//$'\t'/}"
+URL="${URL//$'\t'/}"
+TARGET="$(printf '%s' "$TARGET" | xargs)"
+URL="$(printf '%s' "$URL" | xargs)"
 export TARGET_HOST="$TARGET"
 export TARGET_URL="$URL"
 
