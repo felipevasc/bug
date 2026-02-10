@@ -11,6 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const { parseCommonArgs, emitJsonl, ensureDir, which, runCmdCapture } = require('../../../lib/skill-utils');
+const { collectWatchlistEntries, aggregateWatchlistByCve } = require('../../../lib/watchlist-utils');
 
 const STAGE = 'report';
 const SOURCE = 'src/skills/nodejs/report/02-pdf-report.js';
@@ -142,29 +143,6 @@ function formatSampleList(arr, limit = 5) {
   const entries = cleaned.slice(0, limit).map((v) => `<code>${escapeHtml(v)}</code>`);
   if (cleaned.length <= limit) return entries.join(', ');
   return `${entries.join(', ')} (+${cleaned.length - limit} more)`;
-}
-
-function getWatchlistKey(entry) {
-  if (!entry) return '';
-  return `${entry.cveId || ''}|${entry.tech?.vendor || ''}|${entry.tech?.product || ''}|${entry.tech?.version || ''}`;
-}
-
-function getWatchlistTimestamp(entry) {
-  if (!entry) return '';
-  return entry.timestamp || entry.ts || '';
-}
-
-function shouldReplaceWatchlistEntry(existing, candidate) {
-  if (!existing) return true;
-  const existingTs = getWatchlistTimestamp(existing);
-  const candidateTs = getWatchlistTimestamp(candidate);
-  if (candidateTs && existingTs && candidateTs !== existingTs) {
-    return candidateTs > existingTs;
-  }
-  const existingScore = existing.score !== null && existing.score !== undefined ? existing.score : -1;
-  const candidateScore = candidate.score !== null && candidate.score !== undefined ? candidate.score : -1;
-  if (candidateScore !== existingScore) return candidateScore > existingScore;
-  return true;
 }
 
 function countBy(arr, keyFn) {
@@ -439,90 +417,67 @@ function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
     .filter((n) => n && n.tool === 'cve-enrich' && n.data && Array.isArray(n.data.watchlist));
   const watchlistContext = cveNotes.find((n) => n && n.data && n.data.context)?.data?.context
     || 'CVE enrichment is a technology risk watchlist; treat the findings as candidates for manual verification.';
-  const watchlistMap = new Map();
-  cveNotes.forEach((note) => {
-    (note.data.watchlist || []).forEach((entry) => {
-      if (!entry || !entry.cveId) return;
-      const key = getWatchlistKey(entry);
-      const existing = watchlistMap.get(key);
-      if (!existing || shouldReplaceWatchlistEntry(existing, entry)) {
-        watchlistMap.set(key, entry);
-      }
-    });
-  });
-  const watchlistList = Array.from(watchlistMap.values());
-  const watchlistDisplay = watchlistList.slice(0, 5);
-  const watchlistMore = Math.max(0, watchlistList.length - watchlistDisplay.length);
-  const watchlistCards = watchlistDisplay.map((entry) => {
-    const techParts = [];
-    if (entry.tech) {
-      if (entry.tech.vendor) techParts.push(entry.tech.vendor);
-      if (entry.tech.product) techParts.push(entry.tech.product);
-      if (entry.tech.version) techParts.push(entry.tech.version);
+  const aggregatedWatchlist = aggregateWatchlistByCve(collectWatchlistEntries(cveNotes));
+  const watchlistDisplay = aggregatedWatchlist.slice(0, 5);
+  const watchlistMore = Math.max(0, aggregatedWatchlist.length - watchlistDisplay.length);
+  const formatTechVariants = (variants, limit = 3) => {
+    if (!variants || !variants.length) return '';
+    const cleaned = variants
+      .map((tech) => {
+        if (!tech) return '';
+        const parts = [];
+        if (tech.vendor) parts.push(tech.vendor);
+        if (tech.product && tech.product !== tech.vendor) parts.push(tech.product);
+        if (tech.version) parts.push(tech.version);
+        if (tech.detail) parts.push(`(${tech.detail})`);
+        return parts.filter(Boolean).join(' ');
+      })
+      .filter(Boolean);
+    if (!cleaned.length) return '';
+    const primary = cleaned.slice(0, limit).map((item) => `\`${escapeHtml(item)}\``);
+    if (cleaned.length > limit) {
+      return `${primary.join(', ')} (+${cleaned.length - limit} more)`;
     }
-    const techLabel = techParts.length ? techParts.join(' ') : 'Technology';
+    return primary.join(', ');
+  };
+  const watchlistCards = watchlistDisplay.map((entry) => {
     const scoreBadgeText = entry.score !== null && entry.score !== undefined ? `CVSS ${Number(entry.score).toFixed(1)}` : 'Score unknown';
     const impactLabel = entry.impact || 'Other';
-    const severityTag = entry.severityBand || 'info';
-    const applicabilityText = entry.applicability || 'unknown';
-    const summaryText = entry.shortSummary || 'Summary unavailable.';
-    const generalRefs = [];
-    const seenGeneral = new Set();
-    const exploitRefs = [];
-    const seenExploit = new Set();
-    (entry.exploitReferences || []).forEach((ref) => {
-      if (exploitRefs.length >= 2) return;
-      const value = String(ref || '').trim();
-      if (!value || seenExploit.has(value)) return;
-      seenExploit.add(value);
-      exploitRefs.push(value);
-    });
-    (entry.references || []).forEach((ref) => {
-      if (generalRefs.length >= 3) return;
-      const value = String(ref || '').trim();
-      if (!value || seenGeneral.has(value) || seenExploit.has(value)) return;
-      seenGeneral.add(value);
-      generalRefs.push(value);
-    });
-    const generalRefLinks = generalRefs
-      .map((ref) => {
-        const value = String(ref || '').trim();
-        return value ? `<a href="${escapeHtml(value)}">${escapeHtml(value)}</a>` : '';
-      })
-      .filter(Boolean)
-      .join(', ');
-    const exploitRefLinks = exploitRefs
-      .map((ref) => {
-        const value = String(ref || '').trim();
-        return value ? `<a href="${escapeHtml(value)}">${escapeHtml(value)}</a>` : '';
-      })
-      .filter(Boolean)
-      .join(', ');
-    const generalRefsLine = generalRefLinks ? `<div class="watchlist-references">References: ${generalRefLinks}</div>` : '';
-    const exploitLine = exploitRefLinks ? `<div class="watchlist-exploit">Exploit references: ${exploitRefLinks}</div>` : '';
-    const impactedLine = entry.affected ? `<span>Impacted: ${escapeHtml(entry.affected)}</span>` : '';
+    const preconditionsText = entry.preconditions || 'unknown';
+    const summaryText = entry.shortSummary ? escapeHtml(entry.shortSummary) : 'Summary unavailable.';
+    const affectedLine = entry.affected ? `<span>Impacts ${escapeHtml(entry.affected)}</span>` : '<span class="muted">Affected details unavailable.</span>';
     const fixLine = entry.fixedVersionOrMitigation ? `<span>Fix: ${escapeHtml(entry.fixedVersionOrMitigation)}</span>` : '';
+    const techSummary = formatTechVariants(entry.techVariants);
+    const techLine = techSummary ? `<div class="watchlist-tech">Technologies: ${techSummary}</div>` : '';
+    const exploitLine = `<div class="watchlist-exploit-signal ${entry.exploitSignal ? 'present' : 'absent'}">Exploit signal: ${entry.exploitSignal ? 'yes' : 'no'}</div>`;
+    const referenceList = (entry.references || []).slice(0, 3)
+      .map((ref) => `<a href="${escapeHtml(ref)}">${escapeHtml(ref)}</a>`)
+      .filter(Boolean);
+    const referenceLinks = referenceList.length ? `<div class="watchlist-references">References: ${referenceList.join(', ')}</div>` : '';
+    const exploitRefLinks = (entry.exploitReferences || []).length
+      ? `<div class="watchlist-exploit">Exploit references: ${(entry.exploitReferences || []).slice(0, 2).map((ref) => `<a href="${escapeHtml(ref)}">${escapeHtml(ref)}</a>`).join(', ')}</div>`
+      : '';
     const sourceLine = entry.sources && entry.sources.length
       ? `<div class="watchlist-sources">Sources: ${entry.sources.map((src) => `<code>${escapeHtml(src)}</code>`).join(', ')}</div>`
       : '';
     return `<div class="watchlist-card">
       <div class="watchlist-card-header">
-        <div class="watchlist-card-title"><strong>${escapeHtml(techLabel)}</strong></div>
+        <div class="watchlist-card-title"><strong>${escapeHtml(entry.cveId)}</strong></div>
         <div class="watchlist-card-meta">
-          ${badge(severityTag)}
-          <strong>${escapeHtml(entry.cveId)}</strong>
           <span class="watchlist-score-badge">${escapeHtml(scoreBadgeText)}</span>
           <span class="watchlist-impact-badge">${escapeHtml(impactLabel)}</span>
         </div>
       </div>
-      <div class="watchlist-applicability">Applicability: ${escapeHtml(applicabilityText)}</div>
-      <p class="watchlist-summary">${escapeHtml(summaryText)}</p>
-      <div class="watchlist-impacted">
-        ${impactedLine}
+      <div class="watchlist-preconditions">Preconditions: ${escapeHtml(preconditionsText)}</div>
+      <p class="watchlist-summary">${summaryText}</p>
+      <div class="watchlist-affected">
+        ${affectedLine}
         ${fixLine}
       </div>
-      ${generalRefsLine}
+      ${techLine}
       ${exploitLine}
+      ${referenceLinks}
+      ${exploitRefLinks}
       ${sourceLine}
     </div>`;
   }).join('');
@@ -597,7 +552,7 @@ function buildPrettyBody({ target, runTs, rootOut, records, mdPath }) {
 
     <section class="section">
       <h2>Technology risk watchlist</h2>
-      <p class="muted">${escapeHtml(watchlistContext)}${watchlistList.length ? ` Top ${Math.min(5, watchlistList.length)} entries shown below.` : ''}</p>
+      <p class="muted">${escapeHtml(watchlistContext)}${aggregatedWatchlist.length ? ` Top ${Math.min(5, aggregatedWatchlist.length)} entries shown below.` : ''}</p>
       ${watchlistSection}
     </section>
 
@@ -861,10 +816,10 @@ function htmlTemplate({ title, bodyHtml }) {
       font-size: 14px;
       color: #0f172a;
     }
-    .watchlist-applicability {
+    .watchlist-preconditions {
       font-size: 12px;
       color: #475569;
-      margin-bottom: 12px;
+      margin-bottom: 8px;
     }
     .watchlist-summary {
       margin: 0;
@@ -873,19 +828,31 @@ function htmlTemplate({ title, bodyHtml }) {
       color: #0f172a;
       margin-bottom: 12px;
     }
-    .watchlist-impacted {
+    .watchlist-affected {
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
+      gap: 6px;
       font-size: 12px;
       color: #475569;
       margin-bottom: 8px;
     }
-    .watchlist-impacted span {
-      padding: 4px 8px;
-      border-radius: 10px;
+    .watchlist-affected span {
+      padding: 4px 10px;
+      border-radius: 12px;
       border: 1px solid #e2e8f0;
       background: #f8fafc;
+    }
+    .watchlist-exploit-signal {
+      font-size: 12px;
+      font-weight: 600;
+      color: #0f172a;
+      margin-bottom: 8px;
+    }
+    .watchlist-exploit-signal.present {
+      color: #dc2626;
+    }
+    .watchlist-exploit-signal.absent {
+      color: #0f8614;
     }
     .watchlist-references,
     .watchlist-exploit {
@@ -897,21 +864,6 @@ function htmlTemplate({ title, bodyHtml }) {
     .watchlist-exploit a {
       color: inherit;
       text-decoration: underline;
-    }
-    .watchlist-cve {
-      margin-bottom: 12px;
-      padding-bottom: 10px;
-      border-bottom: 1px dashed #e2e8f0;
-      font-size: 13px;
-      color: #0f172a;
-    }
-    .watchlist-cve:last-child {
-      border-bottom: 0;
-      margin-bottom: 0;
-      padding-bottom: 0;
-    }
-    .watchlist-cve p {
-      margin: 4px 0;
     }
     .watchlist-sources {
       font-size: 12px;

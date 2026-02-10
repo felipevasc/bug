@@ -16,6 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const { parseCommonArgs, emitJsonl, ensureDir } = require('../../../lib/skill-utils');
+const { collectWatchlistEntries, aggregateWatchlistByCve } = require('../../../lib/watchlist-utils');
 
 const STAGE = 'report';
 const SOURCE = 'src/skills/nodejs/report/01-faraday-summary.js';
@@ -148,29 +149,6 @@ function formatSampleList(arr, limit = 5) {
   const items = uniq(arr).slice(0, limit);
   if (!items.length) return '';
   return items.map((v) => `\`${mdEscape(v)}\``).join(', ');
-}
-
-function getWatchlistKey(entry) {
-  if (!entry) return '';
-  return `${entry.cveId || ''}|${entry.tech?.vendor || ''}|${entry.tech?.product || ''}|${entry.tech?.version || ''}`;
-}
-
-function getWatchlistTimestamp(entry) {
-  if (!entry) return '';
-  return entry.timestamp || entry.ts || '';
-}
-
-function shouldReplaceWatchlistEntry(existing, candidate) {
-  if (!existing) return true;
-  const existingTs = getWatchlistTimestamp(existing);
-  const candidateTs = getWatchlistTimestamp(candidate);
-  if (candidateTs && existingTs && candidateTs !== existingTs) {
-    return candidateTs > existingTs;
-  }
-  const existingScore = existing.score !== null && existing.score !== undefined ? existing.score : -1;
-  const candidateScore = candidate.score !== null && candidate.score !== undefined ? candidate.score : -1;
-  if (candidateScore !== existingScore) return candidateScore > existingScore;
-  return true;
 }
 
 async function run({ target, emit, outDir, runTs }) {
@@ -462,36 +440,37 @@ async function run({ target, emit, outDir, runTs }) {
   }
   lines.push('');
 
-  const watchlistNotes = notes.filter((n) => n.tool === 'cve-enrich' && n.data && Array.isArray(n.data.watchlist));
-  const watchlistMap = new Map();
-  watchlistNotes.forEach((note) => {
-    (note.data.watchlist || []).forEach((entry) => {
-      if (!entry || !entry.cveId) return;
-      const key = getWatchlistKey(entry);
-      const existing = watchlistMap.get(key);
-      if (!existing || shouldReplaceWatchlistEntry(existing, entry)) {
-        watchlistMap.set(key, entry);
-      }
-    });
-  });
-  const watchlistList = Array.from(watchlistMap.values());
-  const severityPriority = { high: 0, med: 1, low: 2, info: 3, unknown: 4 };
-  const sortedWatchlist = [...watchlistList].sort((a, b) => {
-    const aSeverity = severityPriority[String(a.severityBand || 'unknown').toLowerCase()] ?? severityPriority.unknown;
-    const bSeverity = severityPriority[String(b.severityBand || 'unknown').toLowerCase()] ?? severityPriority.unknown;
-    if (aSeverity !== bSeverity) return aSeverity - bSeverity;
-    const aScore = a.score !== null && a.score !== undefined ? a.score : -1;
-    const bScore = b.score !== null && b.score !== undefined ? b.score : -1;
-    if (aScore !== bScore) return bScore - aScore;
-    return (a.cveId || '').localeCompare(b.cveId || '');
-  });
-  const watchlistTop = sortedWatchlist.slice(0, 8);
-  const severityCounts = countBy(watchlistList, (entry) => String(entry.severityBand || 'unknown').toLowerCase());
-  const exploitSignalCount = watchlistList.filter((entry) => entry.exploitSignal).length;
+  const watchlistNotes = notes.filter((n) => n && n.tool === 'cve-enrich' && n.data && Array.isArray(n.data.watchlist));
+  const watchlistEntries = collectWatchlistEntries(watchlistNotes);
+  const aggregatedWatchlist = aggregateWatchlistByCve(watchlistEntries);
+  const watchlistTop = aggregatedWatchlist.slice(0, 8);
+  const severityCounts = countBy(watchlistEntries, (entry) => String(entry.severityBand || 'unknown').toLowerCase());
+  const exploitSignalCount = watchlistEntries.filter((entry) => entry.exploitSignal).length;
+
+  const formatTechVariants = (variants, limit = 3) => {
+    if (!variants || !variants.length) return '';
+    const cleaned = variants
+      .map((tech) => {
+        if (!tech) return '';
+        const parts = [];
+        if (tech.vendor) parts.push(tech.vendor);
+        if (tech.product && tech.product !== tech.vendor) parts.push(tech.product);
+        if (tech.version) parts.push(tech.version);
+        if (tech.detail) parts.push(`(${tech.detail})`);
+        return parts.filter(Boolean).join(' ');
+      })
+      .filter(Boolean);
+    if (!cleaned.length) return '';
+    const primary = cleaned.slice(0, limit).map((item) => `\`${mdEscape(item)}\``);
+    if (cleaned.length > limit) {
+      return `${primary.join(', ')} (+${cleaned.length - limit} more)`;
+    }
+    return primary.join(', ');
+  };
 
   lines.push('## Technology risk watchlist (CVE enrichment)');
   lines.push('');
-  if (!watchlistList.length) {
+  if (!watchlistEntries.length) {
     lines.push('_No CVE enrichment watchlist entries were emitted for this run._');
   } else {
     const severityOrder = ['crit', 'high', 'med', 'low', 'info', 'unknown'];
@@ -499,30 +478,20 @@ async function run({ target, emit, outDir, runTs }) {
       .map((label) => `${severityCounts.get(label) || 0} ${label}`)
       .join(' · ');
     lines.push(`- Severity breakdown: ${mdEscape(severitySummary)}.`);
-    lines.push(`- Exploit signal: ${mdEscape(String(exploitSignalCount))} of ${mdEscape(String(watchlistList.length))} entries reference public exploit sources.`);
+    lines.push(`- Exploit signal: ${mdEscape(String(exploitSignalCount))} of ${mdEscape(String(watchlistEntries.length))} entries reference public exploit sources.`);
     lines.push('');
     lines.push('Top CVEs:');
-    watchlistTop.forEach((entry, idx) => {
-      const techParts = [];
-      if (entry.tech) {
-        if (entry.tech.vendor) techParts.push(entry.tech.vendor);
-        if (entry.tech.product) techParts.push(entry.tech.product);
-        if (entry.tech.version) techParts.push(entry.tech.version);
-      }
-      const techLabel = techParts.length ? techParts.join(' ') : 'Technology';
+    watchlistTop.forEach((entry) => {
       const scoreText = entry.score !== null && entry.score !== undefined ? Number(entry.score).toFixed(1) : 'unknown';
       const impactLabel = entry.impact || 'Other';
-      const applicabilityLabel = entry.applicability || 'unknown';
+      const preconditionsText = entry.preconditions || 'unknown';
       const summaryText = entry.shortSummary ? mdEscape(entry.shortSummary) : 'Summary unavailable.';
-      const referenceLinks = (entry.references || []).slice(0, 3)
-        .map((ref) => {
-          const value = String(ref || '').trim();
-          return value ? `[${mdEscape(value)}](${value})` : '';
-        })
-        .filter(Boolean);
-      const refsText = referenceLinks.length ? ` References: ${referenceLinks.join(', ')}` : '';
-      const techNote = techLabel ? ` (Technology: ${mdEscape(techLabel)})` : '';
-      lines.push(`${idx + 1}. **${mdEscape(entry.cveId)}** (CVSS ${mdEscape(scoreText)}, Impact ${mdEscape(impactLabel)}, Applicability ${mdEscape(applicabilityLabel)}) — ${summaryText}${techNote}.${refsText}`);
+      const affectedText = entry.affected ? ` Impacts ${mdEscape(entry.affected)}.` : '';
+      const fixText = entry.fixedVersionOrMitigation ? ` Fix: ${mdEscape(entry.fixedVersionOrMitigation)}.` : '';
+      const techSummary = formatTechVariants(entry.techVariants);
+      const techText = techSummary ? ` Technologies: ${techSummary}.` : '';
+      const exploitSignalText = entry.exploitSignal ? ' Exploit signal: yes.' : ' Exploit signal: no.';
+      lines.push(`- **${mdEscape(entry.cveId)}** (CVSS ${mdEscape(scoreText)}, Impact ${mdEscape(impactLabel)}, Preconditions ${mdEscape(preconditionsText)}) — ${summaryText}${affectedText}${fixText}${techText}${exploitSignalText}`);
     });
   }
   lines.push('');
