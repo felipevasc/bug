@@ -15,7 +15,7 @@ const { loadEnv } = require('../lib/load-env');
 const { ingestRecord, buildPayload } = require('../lib/faraday');
 const { normalizeRecord } = require('../lib/schema');
 const { loadScopeFile, targetInScope } = require('../lib/scope');
-const { parseTarget } = require('../lib/targets');
+const { parseTarget, canonicalizeTargets, compareTargets, parseTargetsText } = require('../lib/targets');
 
 loadEnv();
 
@@ -32,6 +32,15 @@ function parseArgs(argv) {
     if (key === '--target' && val) {
       args.targets.push(val);
       i += 1;
+      continue;
+    }
+    if (key === '--targets-file' && val) {
+      args.targetsFile = val;
+      i += 1;
+      continue;
+    }
+    if (key === '--stdin') {
+      args.stdin = true;
       continue;
     }
     if (key === '--out-dir' && val) {
@@ -94,34 +103,12 @@ function parseArgs(argv) {
   return args;
 }
 
-function buildTargetInfo(raw) {
-  const info = parseTarget(raw);
-  const host = info.host || '';
-  const url = info.kind === 'url' ? (info.url || '') : '';
-  const normalizedTarget = url || host || String(raw || '');
-  return {
-    raw: String(raw || ''),
-    kind: info.kind,
-    host,
-    url,
-    normalizedTarget
-  };
-}
-
 function targetKey(t) {
-  return t.normalizedTarget || t.host || t.raw;
+  return (t && t.key) || (t && (t.normalizedTarget || t.url || t.host || t.input)) || '';
 }
 
 function targetScopeValue(t) {
-  return t.url || t.host || t.raw;
-}
-
-function compareTargets(a, b) {
-  const ka = String(targetKey(a) || '');
-  const kb = String(targetKey(b) || '');
-  if (ka < kb) return -1;
-  if (ka > kb) return 1;
-  return 0;
+  return (t && (t.url || t.host || t.input)) || '';
 }
 
 function detectRunner(skillPath) {
@@ -433,8 +420,8 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const pipelinePath = args.pipeline || 'pipeline.json';
 
-  if (args.targets.length === 0) {
-    process.stderr.write('Usage: run-pipeline --target <t> [--target <t2>] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec] [--max-targets n] [--allow-exploit] [--confirm str] [--dry-run] [--strict]\n');
+  if (args.targets.length === 0 && !args.targetsFile && !args.stdin) {
+    process.stderr.write('Usage: run-pipeline (--target <t> | --targets-file <path> | --stdin) [--target <t2> ...] [--stage recon] [--workspace ws] [--pipeline pipeline.json] [--out-dir dir] [--scope-file file] [--rate n] [--timeout sec] [--max-targets n] [--allow-exploit] [--confirm str] [--dry-run] [--strict]\n');
     process.exit(1);
   }
 
@@ -481,17 +468,25 @@ async function main() {
     return targetInScope(targetScopeValue(t), scope);
   }
 
-  const targetInfos = [];
-  const targetSeen = new Set();
-  for (const raw of args.targets) {
-    const info = buildTargetInfo(raw);
-    if (!info.host && !info.url) continue;
-    const key = targetKey(info);
-    if (targetSeen.has(key)) continue;
-    targetSeen.add(key);
-    targetInfos.push(info);
+  const rawTargets = [];
+  args.targets.forEach((t) => rawTargets.push(t));
+
+  if (args.targetsFile) {
+    const targetsFilePath = path.resolve(String(args.targetsFile));
+    if (!fs.existsSync(targetsFilePath)) {
+      process.stderr.write(`[runner] targets-file not found: ${targetsFilePath}\n`);
+      process.exit(1);
+    }
+    const txt = fs.readFileSync(targetsFilePath, 'utf8');
+    parseTargetsText(txt).forEach((t) => rawTargets.push(t));
   }
-  targetInfos.sort(compareTargets);
+
+  if (args.stdin) {
+    const txt = fs.readFileSync(0, 'utf8');
+    parseTargetsText(txt).forEach((t) => rawTargets.push(t));
+  }
+
+  const targetInfos = canonicalizeTargets(rawTargets);
 
   if (targetInfos.length === 0) {
     process.stderr.write('[runner] no valid targets after normalization\n');
@@ -509,7 +504,7 @@ async function main() {
       const okGate = Boolean(args.allowExploit);
       if (!okGate) {
         const gateTarget = stageTargets[0] || targetInfos[0] || null;
-        const gateTargetHost = gateTarget ? (gateTarget.host || gateTarget.normalizedTarget || gateTarget.raw) : '';
+        const gateTargetHost = gateTarget ? (gateTarget.host || gateTarget.normalizedTarget || gateTarget.input) : '';
         const record = buildPayload({
           type: 'note',
           tool: 'intrusive-gate',
@@ -574,7 +569,7 @@ async function main() {
       });
 
       discovered.forEach((raw) => {
-        const info = buildTargetInfo(raw);
+        const info = parseTarget(raw);
         if (!info.host) return;
         if (hostSet.has(info.host)) return;
         if (!inScopeOrAllowAll(info)) return;
